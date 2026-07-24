@@ -13,7 +13,12 @@ use winit::{
     window::WindowId,
 };
 
-use crate::{dispatcher::execute_runnable, display::WinitDisplay, window::WindowState};
+use crate::{
+    dispatcher::execute_runnable,
+    display::WinitDisplay,
+    input::{current_capslock, modifiers_from_winit},
+    window::WindowState,
+};
 
 pub(crate) enum LoopCommand {
     CloseWindow(WindowId),
@@ -193,15 +198,41 @@ impl ApplicationHandler for WinitAppState {
                         registry.active_window = None;
                     }
                 }
-                WindowEvent::PointerEntered { .. } => {
-                    state.restore_cursor();
-                    state.hovered(true);
+                WindowEvent::KeyboardInput {
+                    event,
+                    is_synthetic,
+                    ..
+                } => {
+                    state.keyboard_input(event, is_synthetic);
                 }
-                WindowEvent::PointerMoved { .. } => {
-                    state.restore_cursor();
+                WindowEvent::ModifiersChanged(modifiers) => {
+                    state.modifiers_changed(
+                        modifiers_from_winit(modifiers.state()),
+                        current_capslock(),
+                    );
                 }
-                WindowEvent::PointerLeft { .. } => {
-                    state.hovered(false);
+                WindowEvent::Ime(event) => {
+                    state.ime(event);
+                }
+                WindowEvent::PointerEntered { position, .. } => {
+                    state.pointer_entered(position);
+                }
+                WindowEvent::PointerMoved { position, .. } => {
+                    state.pointer_moved(position);
+                }
+                WindowEvent::PointerLeft { position, .. } => {
+                    state.pointer_left(position);
+                }
+                WindowEvent::PointerButton {
+                    state: button_state,
+                    position,
+                    button,
+                    ..
+                } => {
+                    state.pointer_button(button_state, position, button);
+                }
+                WindowEvent::MouseWheel { delta, phase, .. } => {
+                    state.mouse_wheel(delta, phase);
                 }
                 WindowEvent::ThemeChanged(_) => {
                     state.appearance_changed();

@@ -8,10 +8,12 @@ use std::{
 use anyhow::Result;
 use futures::channel::oneshot;
 use gpui::{
-    Bounds, Capslock, Decorations, DevicePixels, DispatchEventResult, GpuSpecs, Modifiers, Pixels,
-    PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point,
-    PromptButton, PromptLevel, RequestFrameOptions, ResizeEdge, Scene, Size, WindowAppearance,
-    WindowBackgroundAppearance, WindowBounds, WindowControlArea,
+    Bounds, Capslock, Decorations, DevicePixels, DispatchEventResult, GpuSpecs, KeyDownEvent,
+    KeyUpEvent, Modifiers, ModifiersChangedEvent, MouseDownEvent, MouseExitEvent, MouseMoveEvent,
+    MouseUpEvent, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler,
+    PlatformWindow, Point, PromptButton, PromptLevel, RequestFrameOptions, ResizeEdge, Scene,
+    ScrollDelta, ScrollWheelEvent, Size, WindowAppearance, WindowBackgroundAppearance,
+    WindowBounds, WindowControlArea,
 };
 use gpui_wgpu::{GpuContext, WgpuRenderer, WgpuSurfaceConfig, wgpu};
 use raw_window_handle::{
@@ -20,17 +22,29 @@ use raw_window_handle::{
 };
 use winit::{
     cursor::CursorIcon,
-    dpi::LogicalSize,
+    dpi::{LogicalPosition, LogicalSize},
+    event::{ElementState, Ime, KeyEvent, MouseScrollDelta},
     event_loop::EventLoopProxy,
     monitor::Fullscreen,
-    window::{ResizeDirection, Theme, Window},
+    window::{
+        ImeCapabilities, ImeEnableRequest, ImeHint, ImePurpose, ImeRequest, ImeRequestData,
+        ResizeDirection, Theme, Window,
+    },
 };
 
-use crate::{app_state::LoopCommand, display::WinitDisplay};
+use crate::{
+    app_state::LoopCommand,
+    display::WinitDisplay,
+    input::{
+        ClickState, current_capslock, current_modifiers, keystroke_from_winit, logical_position,
+        mouse_button_from_winit, touch_phase_from_winit, utf8_cursor_to_utf16,
+    },
+};
 
 #[derive(Default)]
 struct WindowCallbacks {
     request_frame: Cell<Option<Box<dyn FnMut(RequestFrameOptions)>>>,
+    input: Cell<Option<Box<dyn FnMut(PlatformInput) -> DispatchEventResult>>>,
     active_status_change: Cell<Option<Box<dyn FnMut(bool)>>>,
     hover_status_change: Cell<Option<Box<dyn FnMut(bool)>>>,
     resize: Cell<Option<Box<dyn FnMut(Size<Pixels>, f32)>>>,
@@ -48,6 +62,8 @@ pub(crate) struct WindowState {
     callbacks: WindowCallbacks,
     input_handler: RefCell<Option<PlatformInputHandler>>,
     mouse_position: Cell<Point<Pixels>>,
+    pressed_button: Cell<Option<gpui::MouseButton>>,
+    click_state: RefCell<ClickState>,
     modifiers: Cell<Modifiers>,
     capslock: Cell<Capslock>,
     active: Cell<bool>,
@@ -55,6 +71,9 @@ pub(crate) struct WindowState {
     background: Cell<WindowBackgroundAppearance>,
     title: RefCell<String>,
     force_render_after_recovery: Cell<bool>,
+    ime_active: Cell<bool>,
+    ime_preedit: Cell<bool>,
+    ime_area: Cell<Bounds<Pixels>>,
     cursor_visible: Rc<Cell<bool>>,
 }
 
@@ -80,7 +99,7 @@ impl WindowState {
             None,
         )?;
 
-        Ok(Rc::new(Self {
+        let state = Rc::new(Self {
             renderer: RefCell::new(renderer),
             active: Cell::new(window.has_focus()),
             window,
@@ -89,14 +108,21 @@ impl WindowState {
             callbacks: WindowCallbacks::default(),
             input_handler: RefCell::new(None),
             mouse_position: Cell::new(Point::default()),
-            modifiers: Cell::new(Modifiers::default()),
-            capslock: Cell::new(Capslock::default()),
+            pressed_button: Cell::new(None),
+            click_state: RefCell::new(ClickState::default()),
+            modifiers: Cell::new(current_modifiers()),
+            capslock: Cell::new(current_capslock()),
             hovered: Cell::new(false),
             background: Cell::new(WindowBackgroundAppearance::Opaque),
             title: RefCell::new(title),
             force_render_after_recovery: Cell::new(false),
+            ime_active: Cell::new(false),
+            ime_preedit: Cell::new(false),
+            ime_area: Cell::new(Bounds::default()),
             cursor_visible,
-        }))
+        });
+        state.enable_ime();
+        Ok(state)
     }
 
     fn invoke_mut<T: ?Sized>(cell: &Cell<Option<Box<T>>>, invoke: impl FnOnce(&mut T)) {
@@ -133,20 +159,209 @@ impl WindowState {
 
     pub(crate) fn focused(&self, focused: bool) {
         self.active.set(focused);
+        if focused {
+            self.modifiers_changed(current_modifiers(), current_capslock());
+        } else {
+            self.pressed_button.set(None);
+        }
         Self::invoke_mut(&self.callbacks.active_status_change, |callback| {
             callback(focused);
         });
     }
 
     pub(crate) fn hovered(&self, hovered: bool) {
-        self.hovered.set(hovered);
-        Self::invoke_mut(&self.callbacks.hover_status_change, |callback| {
-            callback(hovered);
-        });
+        if self.hovered.replace(hovered) != hovered {
+            Self::invoke_mut(&self.callbacks.hover_status_change, |callback| {
+                callback(hovered);
+            });
+        }
     }
 
     pub(crate) fn appearance_changed(&self) {
         Self::invoke_mut(&self.callbacks.appearance_changed, |callback| callback());
+    }
+
+    pub(crate) fn keyboard_input(&self, event: KeyEvent, is_synthetic: bool) {
+        let modifiers = current_modifiers();
+        let capslock = current_capslock();
+        if modifiers != self.modifiers.get() || capslock != self.capslock.get() {
+            self.modifiers_changed(modifiers, capslock);
+        }
+
+        let Some((keystroke, prefer_character_input)) = keystroke_from_winit(&event, modifiers)
+        else {
+            return;
+        };
+        let key_char = keystroke.key_char.clone();
+        let text_modifiers = keystroke.modifiers;
+        let pressed = event.state == ElementState::Pressed;
+        let input = if pressed {
+            PlatformInput::KeyDown(KeyDownEvent {
+                keystroke,
+                is_held: event.repeat,
+                prefer_character_input,
+            })
+        } else {
+            PlatformInput::KeyUp(KeyUpEvent { keystroke })
+        };
+        let result = self.dispatch_input(input);
+
+        if pressed
+            && !is_synthetic
+            && result.propagate
+            && !result.default_prevented
+            && (prefer_character_input || text_modifiers.is_subset_of(&Modifiers::shift()))
+            && let Some(key_char) = key_char
+        {
+            self.with_input_handler(|handler| handler.replace_text_in_range(None, &key_char));
+        }
+    }
+
+    pub(crate) fn modifiers_changed(&self, modifiers: Modifiers, capslock: Capslock) {
+        self.modifiers.set(modifiers);
+        self.capslock.set(capslock);
+        self.dispatch_input(PlatformInput::ModifiersChanged(ModifiersChangedEvent {
+            modifiers,
+            capslock,
+        }));
+    }
+
+    pub(crate) fn pointer_entered(&self, position: winit::dpi::PhysicalPosition<f64>) {
+        self.restore_cursor();
+        self.mouse_position
+            .set(logical_position(position, self.scale_factor()));
+        self.hovered(true);
+    }
+
+    pub(crate) fn pointer_moved(&self, position: winit::dpi::PhysicalPosition<f64>) {
+        self.restore_cursor();
+        let position = logical_position(position, self.scale_factor());
+        self.mouse_position.set(position);
+        self.hovered(true);
+        self.dispatch_input(PlatformInput::MouseMove(MouseMoveEvent {
+            position,
+            pressed_button: self.pressed_button.get(),
+            modifiers: self.modifiers.get(),
+        }));
+    }
+
+    pub(crate) fn pointer_left(&self, position: Option<winit::dpi::PhysicalPosition<f64>>) {
+        if let Some(position) = position {
+            self.mouse_position
+                .set(logical_position(position, self.scale_factor()));
+        }
+        self.hovered(false);
+        self.dispatch_input(PlatformInput::MouseExited(MouseExitEvent {
+            position: self.mouse_position.get(),
+            pressed_button: self.pressed_button.get(),
+            modifiers: self.modifiers.get(),
+        }));
+    }
+
+    pub(crate) fn pointer_button(
+        &self,
+        state: ElementState,
+        position: winit::dpi::PhysicalPosition<f64>,
+        button: winit::event::ButtonSource,
+    ) {
+        let Some(button) = mouse_button_from_winit(button) else {
+            return;
+        };
+        let position = logical_position(position, self.scale_factor());
+        self.mouse_position.set(position);
+        let modifiers = self.modifiers.get();
+
+        match state {
+            ElementState::Pressed => {
+                self.pressed_button.set(Some(button));
+                let click_count = self.click_state.borrow_mut().update(button, position);
+                self.dispatch_input(PlatformInput::MouseDown(MouseDownEvent {
+                    button,
+                    position,
+                    modifiers,
+                    click_count,
+                    first_mouse: false,
+                }));
+            }
+            ElementState::Released => {
+                self.pressed_button.set(None);
+                let click_count = self.click_state.borrow().count_for(button);
+                self.dispatch_input(PlatformInput::MouseUp(MouseUpEvent {
+                    button,
+                    position,
+                    modifiers,
+                    click_count,
+                }));
+            }
+        }
+    }
+
+    pub(crate) fn mouse_wheel(&self, delta: MouseScrollDelta, phase: winit::event::TouchPhase) {
+        let delta = match delta {
+            MouseScrollDelta::LineDelta(x, y) => ScrollDelta::Lines(gpui::point(x, y)),
+            MouseScrollDelta::PixelDelta(delta) => {
+                let position = logical_position(delta, self.scale_factor());
+                ScrollDelta::Pixels(position)
+            }
+        };
+        self.dispatch_input(PlatformInput::ScrollWheel(ScrollWheelEvent {
+            position: self.mouse_position.get(),
+            delta,
+            modifiers: self.modifiers.get(),
+            touch_phase: touch_phase_from_winit(phase),
+        }));
+    }
+
+    pub(crate) fn ime(&self, event: Ime) {
+        match event {
+            Ime::Enabled => {
+                self.ime_active.set(true);
+                self.ime_preedit.set(false);
+                self.update_ime_area();
+            }
+            Ime::Preedit(text, cursor) => {
+                self.ime_preedit.set(!text.is_empty());
+                let selection = cursor.map(|(start, end)| {
+                    let start = utf8_cursor_to_utf16(&text, start);
+                    let end = utf8_cursor_to_utf16(&text, end);
+                    start.min(end)..start.max(end)
+                });
+                let bounds = self
+                    .with_input_handler(|handler| {
+                        handler.replace_and_mark_text_in_range(None, &text, selection);
+                        let selection = handler.selected_text_range(true)?;
+                        let cursor = if selection.reversed {
+                            selection.range.start
+                        } else {
+                            selection.range.end
+                        };
+                        handler.bounds_for_range(cursor..cursor)
+                    })
+                    .flatten();
+                if let Some(bounds) = bounds {
+                    self.ime_area.set(bounds);
+                    self.update_ime_area();
+                }
+            }
+            Ime::Commit(text) => {
+                self.ime_preedit.set(false);
+                self.with_input_handler(|handler| {
+                    handler.replace_text_in_range(None, &text);
+                    handler.unmark_text();
+                });
+            }
+            Ime::Disabled => {
+                self.ime_active.set(false);
+                let had_preedit = self.ime_preedit.replace(false);
+                self.with_input_handler(|handler| {
+                    if had_preedit {
+                        handler.replace_and_mark_text_in_range(None, "", None);
+                    }
+                    handler.unmark_text();
+                });
+            }
+            Ime::DeleteSurrounding { .. } => {}
+        }
     }
 
     pub(crate) fn should_close(&self) -> bool {
@@ -171,6 +386,63 @@ impl WindowState {
 
     pub(crate) fn set_cursor(&self, style: gpui::CursorStyle) {
         self.window.set_cursor(cursor_icon(style).into());
+    }
+
+    fn dispatch_input(&self, input: PlatformInput) -> DispatchEventResult {
+        let Some(mut callback) = self.callbacks.input.take() else {
+            return DispatchEventResult {
+                propagate: true,
+                default_prevented: false,
+            };
+        };
+        let result = callback(input);
+        self.callbacks.input.set(Some(callback));
+        result
+    }
+
+    fn with_input_handler<R>(
+        &self,
+        callback: impl FnOnce(&mut PlatformInputHandler) -> R,
+    ) -> Option<R> {
+        let mut handler = self.input_handler.borrow_mut().take()?;
+        let result = callback(&mut handler);
+        self.input_handler.borrow_mut().replace(handler);
+        Some(result)
+    }
+
+    fn enable_ime(&self) {
+        let capabilities = ImeCapabilities::new()
+            .with_hint_and_purpose()
+            .with_cursor_area();
+        let request_data = ImeRequestData::default()
+            .with_hint_and_purpose(ImeHint::NONE, ImePurpose::Normal)
+            .with_cursor_area(
+                LogicalPosition::new(0.0, 0.0).into(),
+                LogicalSize::new(0.0, 0.0).into(),
+            );
+        if let Some(request) = ImeEnableRequest::new(capabilities, request_data) {
+            let _ = self.window.request_ime_update(ImeRequest::Enable(request));
+        }
+    }
+
+    fn update_ime_area(&self) {
+        if !self.ime_active.get() {
+            return;
+        }
+        let bounds = self.ime_area.get();
+        let request = ImeRequestData::default().with_cursor_area(
+            LogicalPosition::new(
+                bounds.origin.x.as_f32() as f64,
+                bounds.origin.y.as_f32() as f64,
+            )
+            .into(),
+            LogicalSize::new(
+                bounds.size.width.as_f32() as f64,
+                bounds.size.height.as_f32() as f64,
+            )
+            .into(),
+        );
+        let _ = self.window.request_ime_update(ImeRequest::Update(request));
     }
 
     fn content_size(&self) -> Size<Pixels> {
@@ -416,7 +688,9 @@ impl PlatformWindow for WinitWindow {
         self.state.callbacks.request_frame.set(Some(callback));
     }
 
-    fn on_input(&self, _callback: Box<dyn FnMut(PlatformInput) -> DispatchEventResult>) {}
+    fn on_input(&self, callback: Box<dyn FnMut(PlatformInput) -> DispatchEventResult>) {
+        self.state.callbacks.input.set(Some(callback));
+    }
 
     fn on_active_status_change(&self, callback: Box<dyn FnMut(bool)>) {
         self.state
@@ -536,7 +810,10 @@ impl PlatformWindow for WinitWindow {
         Some(self.state.renderer.borrow().gpu_specs())
     }
 
-    fn update_ime_position(&self, _bounds: Bounds<Pixels>) {}
+    fn update_ime_position(&self, bounds: Bounds<Pixels>) {
+        self.state.ime_area.set(bounds);
+        self.state.update_ime_area();
+    }
 }
 
 fn device_size(size: winit::dpi::PhysicalSize<u32>) -> Size<DevicePixels> {
