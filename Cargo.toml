@@ -110,6 +110,7 @@ ashpd = { version = "0.13", default-features = false, features = [
 libc = "0.2"
 smol = "2.0"
 util = { git = "https://github.com/zed-industries/zed", rev = "876ec5a8a074ba83cce2129ed4d76b59c05a37e9" }
+winit = "0.31.0-beta.2"
 wgpu = { git = "https://github.com/zed-industries/wgpu.git", rev = "357a0c56e0070480ad9daea5d2eaa83150b79e88" }
 criterion = { version = "0.5", features = ["html_reports"] }
 objc2-app-kit = { version = "0.3", default-features = false, features = [

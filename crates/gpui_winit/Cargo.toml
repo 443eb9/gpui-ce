@@ -9,7 +9,15 @@ license.workspace = true
 homepage.workspace = true
 readme.workspace = true
 
-[dependencies]
-
 [lints]
 workspace = true
+
+[lib]
+path = "src/gpui_winit.rs"
+
+[dependencies]
+anyhow.workspace = true
+futures.workspace = true
+gpui.workspace = true
+gpui_wgpu.workspace = true
+winit.workspace = true
