@@ -32,6 +32,7 @@ x11 = ["scap?/x11"]
 screen-capture = ["scap"]
 windows-manifest = ["dep:embed-resource"]
 input-latency-histogram = ["dep:hdrhistogram"]
+wgpu = []
 
 [lib]
 path = "src/gpui.rs"
