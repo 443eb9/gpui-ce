@@ -48,6 +48,7 @@ pub struct WinitUnifiedPlatform {
     background_executor: BackgroundExecutor,
     foreground_executor: ForegroundExecutor,
     text_system: Arc<dyn PlatformTextSystem>,
+    gpu_context: gpui_wgpu::GpuContext,
     registry: Rc<RefCell<WindowRegistry>>,
     callbacks: Rc<PlatformCallbacks>,
     cursor_style: Cell<CursorStyle>,
@@ -71,6 +72,7 @@ impl WinitUnifiedPlatform {
             background_executor: BackgroundExecutor::new(dispatcher.clone()),
             foreground_executor: ForegroundExecutor::new(dispatcher),
             text_system: Arc::new(gpui_wgpu::CosmicTextSystem::new("Segoe UI")),
+            gpu_context: Rc::new(RefCell::new(None)),
             registry: Rc::new(RefCell::new(WindowRegistry::default())),
             callbacks: Rc::new(PlatformCallbacks::default()),
             cursor_style: Cell::new(CursorStyle::Arrow),
@@ -267,7 +269,13 @@ impl Platform for WinitUnifiedPlatform {
                 .create_window(attributes)
                 .map(Arc::from)
                 .map_err(|error| anyhow!("failed to create winit window: {error}"))?;
-            let state = WindowState::new(window, handle, self.cursor_visible.clone(), title);
+            let state = WindowState::new(
+                window,
+                handle,
+                self.cursor_visible.clone(),
+                title,
+                self.gpu_context.clone(),
+            )?;
             state.set_cursor(self.cursor_style.get());
             let window_id = state.window.id();
             self.registry

@@ -1,7 +1,5 @@
 use std::{
-    borrow::Cow,
     cell::{Cell, RefCell},
-    collections::HashMap,
     ffi::c_void,
     rc::Rc,
     sync::Arc,
@@ -10,13 +8,16 @@ use std::{
 use anyhow::Result;
 use futures::channel::oneshot;
 use gpui::{
-    AtlasKey, AtlasTextureId, AtlasTile, Bounds, Capslock, Decorations, DevicePixels,
-    DispatchEventResult, GpuSpecs, Modifiers, Pixels, PlatformAtlas, PlatformDisplay,
-    PlatformInput, PlatformInputHandler, PlatformWindow, Point, PromptButton, PromptLevel,
-    RequestFrameOptions, ResizeEdge, Scene, Size, TileId, WindowAppearance,
+    Bounds, Capslock, Decorations, DevicePixels, DispatchEventResult, GpuSpecs, Modifiers, Pixels,
+    PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point,
+    PromptButton, PromptLevel, RequestFrameOptions, ResizeEdge, Scene, Size, WindowAppearance,
     WindowBackgroundAppearance, WindowBounds, WindowControlArea,
 };
-use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawWindowHandle};
+use gpui_wgpu::{GpuContext, WgpuRenderer, WgpuSurfaceConfig, wgpu};
+use raw_window_handle::{
+    DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle,
+    RawWindowHandle, WindowHandle,
+};
 use winit::{
     cursor::CursorIcon,
     dpi::LogicalSize,
@@ -40,7 +41,9 @@ struct WindowCallbacks {
 }
 
 pub(crate) struct WindowState {
+    renderer: RefCell<WgpuRenderer>,
     pub(crate) window: Arc<dyn Window>,
+    raw_window: RawWinitWindow,
     pub(crate) handle: gpui::AnyWindowHandle,
     callbacks: WindowCallbacks,
     input_handler: RefCell<Option<PlatformInputHandler>>,
@@ -51,7 +54,7 @@ pub(crate) struct WindowState {
     hovered: Cell<bool>,
     background: Cell<WindowBackgroundAppearance>,
     title: RefCell<String>,
-    atlas: Arc<EmptyAtlas>,
+    force_render_after_recovery: Cell<bool>,
     cursor_visible: Rc<Cell<bool>>,
 }
 
@@ -61,10 +64,27 @@ impl WindowState {
         handle: gpui::AnyWindowHandle,
         cursor_visible: Rc<Cell<bool>>,
         title: String,
-    ) -> Rc<Self> {
-        Rc::new(Self {
+        gpu_context: GpuContext,
+    ) -> Result<Rc<Self>> {
+        let raw_window = RawWinitWindow::new(window.as_ref())?;
+        let physical_size = window.surface_size();
+        let renderer = WgpuRenderer::new(
+            gpu_context,
+            &raw_window,
+            WgpuSurfaceConfig {
+                size: device_size(physical_size),
+                transparent: false,
+                preferred_present_mode: Some(wgpu::PresentMode::Fifo),
+            },
+            None,
+            None,
+        )?;
+
+        Ok(Rc::new(Self {
+            renderer: RefCell::new(renderer),
             active: Cell::new(window.has_focus()),
             window,
+            raw_window,
             handle,
             callbacks: WindowCallbacks::default(),
             input_handler: RefCell::new(None),
@@ -74,9 +94,9 @@ impl WindowState {
             hovered: Cell::new(false),
             background: Cell::new(WindowBackgroundAppearance::Opaque),
             title: RefCell::new(title),
-            atlas: Arc::new(EmptyAtlas::default()),
+            force_render_after_recovery: Cell::new(false),
             cursor_visible,
-        })
+        }))
     }
 
     fn invoke_mut<T: ?Sized>(cell: &Cell<Option<Box<T>>>, invoke: impl FnOnce(&mut T)) {
@@ -87,15 +107,19 @@ impl WindowState {
     }
 
     pub(crate) fn request_frame(&self) {
-        Self::invoke_mut(&self.callbacks.request_frame, |callback| {
+        if let Some(mut callback) = self.callbacks.request_frame.take() {
             callback(RequestFrameOptions {
                 require_presentation: true,
-                force_render: false,
+                force_render: self.force_render_after_recovery.replace(false),
             });
-        });
+            self.callbacks.request_frame.set(Some(callback));
+        }
     }
 
     pub(crate) fn resized(&self) {
+        self.renderer
+            .borrow_mut()
+            .update_drawable_size(device_size(self.window.surface_size()));
         let size = self.content_size();
         let scale_factor = self.scale_factor();
         Self::invoke_mut(&self.callbacks.resize, |callback| {
@@ -160,6 +184,36 @@ impl WindowState {
 
     fn scale_factor(&self) -> f32 {
         self.window.scale_factor() as f32
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RawWinitWindow {
+    window: RawWindowHandle,
+    display: RawDisplayHandle,
+}
+
+unsafe impl Send for RawWinitWindow {}
+unsafe impl Sync for RawWinitWindow {}
+
+impl RawWinitWindow {
+    fn new(window: &dyn Window) -> std::result::Result<Self, HandleError> {
+        Ok(Self {
+            window: window.window_handle()?.as_raw(),
+            display: window.display_handle()?.as_raw(),
+        })
+    }
+}
+
+impl HasWindowHandle for RawWinitWindow {
+    fn window_handle(&self) -> std::result::Result<WindowHandle<'_>, HandleError> {
+        Ok(unsafe { WindowHandle::borrow_raw(self.window) })
+    }
+}
+
+impl HasDisplayHandle for RawWinitWindow {
+    fn display_handle(&self) -> std::result::Result<DisplayHandle<'_>, HandleError> {
+        Ok(unsafe { DisplayHandle::borrow_raw(self.display) })
     }
 }
 
@@ -328,6 +382,10 @@ impl PlatformWindow for WinitWindow {
         let blurred = appearance == WindowBackgroundAppearance::Blurred;
         self.state.window.set_transparent(transparent);
         self.state.window.set_blur(blurred);
+        self.state
+            .renderer
+            .borrow_mut()
+            .update_transparency(transparent);
     }
 
     fn minimize(&self) {
@@ -394,14 +452,33 @@ impl PlatformWindow for WinitWindow {
         self.state.callbacks.appearance_changed.set(Some(callback));
     }
 
-    fn draw(&self, _scene: &Scene) {}
+    fn draw(&self, scene: &Scene) {
+        let mut renderer = self.state.renderer.borrow_mut();
+        if renderer.device_lost() {
+            if let Err(error) = renderer.recover(&self.state.raw_window) {
+                log::warn!("GPU recovery failed, will retry on next frame: {error}");
+            }
+            self.state.force_render_after_recovery.set(true);
+            self.state.window.request_redraw();
+            return;
+        }
+
+        self.state.window.pre_present_notify();
+        if !renderer.draw(scene) {
+            self.state.window.request_redraw();
+        }
+        if renderer.needs_redraw() {
+            self.state.force_render_after_recovery.set(true);
+            self.state.window.request_redraw();
+        }
+    }
 
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
-        self.state.atlas.clone()
+        self.state.renderer.borrow().sprite_atlas().clone()
     }
 
     fn is_subpixel_rendering_supported(&self) -> bool {
-        false
+        self.state.renderer.borrow().supports_dual_source_blending()
     }
 
     fn get_title(&self) -> String {
@@ -456,60 +533,16 @@ impl PlatformWindow for WinitWindow {
     }
 
     fn gpu_specs(&self) -> Option<GpuSpecs> {
-        None
+        Some(self.state.renderer.borrow().gpu_specs())
     }
 
     fn update_ime_position(&self, _bounds: Bounds<Pixels>) {}
 }
 
-#[derive(Default)]
-struct EmptyAtlas {
-    state: RefCell<EmptyAtlasState>,
-}
-
-#[derive(Default)]
-struct EmptyAtlasState {
-    next_id: u32,
-    tiles: HashMap<AtlasKey, AtlasTile>,
-}
-
-impl PlatformAtlas for EmptyAtlas {
-    fn get_or_insert_with<'a>(
-        &self,
-        key: &AtlasKey,
-        build: &mut dyn FnMut() -> Result<Option<(Size<DevicePixels>, Cow<'a, [u8]>)>>,
-    ) -> Result<Option<AtlasTile>> {
-        if let Some(tile) = self.state.borrow().tiles.get(key).copied() {
-            return Ok(Some(tile));
-        }
-
-        let Some((size, _)) = build()? else {
-            return Ok(None);
-        };
-
-        let mut state = self.state.borrow_mut();
-        state.next_id = state.next_id.wrapping_add(1);
-        let texture_id = state.next_id;
-        state.next_id = state.next_id.wrapping_add(1);
-        let tile_id = state.next_id;
-        let tile = AtlasTile {
-            texture_id: AtlasTextureId {
-                index: texture_id,
-                kind: key.texture_kind(),
-            },
-            tile_id: TileId(tile_id),
-            padding: 0,
-            bounds: Bounds {
-                origin: Point::default(),
-                size,
-            },
-        };
-        state.tiles.insert(key.clone(), tile);
-        Ok(Some(tile))
-    }
-
-    fn remove(&self, key: &AtlasKey) {
-        self.state.borrow_mut().tiles.remove(key);
+fn device_size(size: winit::dpi::PhysicalSize<u32>) -> Size<DevicePixels> {
+    Size {
+        width: DevicePixels(size.width.min(i32::MAX as u32) as i32),
+        height: DevicePixels(size.height.min(i32::MAX as u32) as i32),
     }
 }
 
