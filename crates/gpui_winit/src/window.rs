@@ -3,6 +3,7 @@ use std::{
     ffi::c_void,
     rc::Rc,
     sync::Arc,
+    time::{Duration, Instant},
 };
 
 use anyhow::Result;
@@ -71,6 +72,11 @@ pub(crate) struct WindowState {
     background: Cell<WindowBackgroundAppearance>,
     title: RefCell<String>,
     force_render_after_recovery: Cell<bool>,
+    gpu_recovery_pending: Cell<bool>,
+    gpu_recovery_failures: Cell<u32>,
+    gpu_recovery_after: Cell<Option<Instant>>,
+    occluded: Cell<bool>,
+    closing: Cell<bool>,
     ime_active: Cell<bool>,
     ime_preedit: Cell<bool>,
     ime_area: Cell<Bounds<Pixels>>,
@@ -116,6 +122,11 @@ impl WindowState {
             background: Cell::new(WindowBackgroundAppearance::Opaque),
             title: RefCell::new(title),
             force_render_after_recovery: Cell::new(false),
+            gpu_recovery_pending: Cell::new(false),
+            gpu_recovery_failures: Cell::new(0),
+            gpu_recovery_after: Cell::new(None),
+            occluded: Cell::new(false),
+            closing: Cell::new(false),
             ime_active: Cell::new(false),
             ime_preedit: Cell::new(false),
             ime_area: Cell::new(Bounds::default()),
@@ -133,6 +144,18 @@ impl WindowState {
     }
 
     pub(crate) fn request_frame(&self) {
+        let size = self.window.surface_size();
+        if self.closing.get() || self.occluded.get() || size.width == 0 || size.height == 0 {
+            return;
+        }
+        if self.gpu_recovery_pending.get()
+            && self
+                .gpu_recovery_after
+                .get()
+                .is_some_and(|retry_after| Instant::now() < retry_after)
+        {
+            return;
+        }
         if let Some(mut callback) = self.callbacks.request_frame.take() {
             callback(RequestFrameOptions {
                 require_presentation: true,
@@ -143,6 +166,9 @@ impl WindowState {
     }
 
     pub(crate) fn resized(&self) {
+        if self.closing.get() {
+            return;
+        }
         self.renderer
             .borrow_mut()
             .update_drawable_size(device_size(self.window.surface_size()));
@@ -179,6 +205,13 @@ impl WindowState {
 
     pub(crate) fn appearance_changed(&self) {
         Self::invoke_mut(&self.callbacks.appearance_changed, |callback| callback());
+    }
+
+    pub(crate) fn set_occluded(&self, occluded: bool) {
+        self.occluded.set(occluded);
+        if !occluded && !self.closing.get() {
+            self.window.request_redraw();
+        }
     }
 
     pub(crate) fn keyboard_input(&self, event: KeyEvent, is_synthetic: bool) {
@@ -360,7 +393,9 @@ impl WindowState {
                     handler.unmark_text();
                 });
             }
-            Ime::DeleteSurrounding { .. } => {}
+            Ime::DeleteSurrounding { .. } => {
+                // TODO(winit): Apply IME surrounding-text deletion.
+            }
         }
     }
 
@@ -372,8 +407,13 @@ impl WindowState {
         result
     }
 
-    pub(crate) fn closed(&self) {
-        if let Some(callback) = self.callbacks.close.take() {
+    pub(crate) fn shutdown(&self, notify: bool) {
+        if self.closing.replace(true) {
+            return;
+        }
+        self.renderer.borrow_mut().destroy();
+        self.input_handler.borrow_mut().take();
+        if notify && let Some(callback) = self.callbacks.close.take() {
             callback();
         }
     }
@@ -459,13 +499,21 @@ impl WindowState {
     }
 }
 
+impl Drop for WindowState {
+    fn drop(&mut self) {
+        self.renderer.get_mut().destroy();
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct RawWinitWindow {
     window: RawWindowHandle,
     display: RawDisplayHandle,
 }
 
+// SAFETY: WindowState keeps the native window alive while these handles are used.
 unsafe impl Send for RawWinitWindow {}
+// SAFETY: Wgpu only reads the handles while WindowState owns the native window.
 unsafe impl Sync for RawWinitWindow {}
 
 impl RawWinitWindow {
@@ -479,12 +527,14 @@ impl RawWinitWindow {
 
 impl HasWindowHandle for RawWinitWindow {
     fn window_handle(&self) -> std::result::Result<WindowHandle<'_>, HandleError> {
+        // SAFETY: The borrowed handle cannot outlive RawWinitWindow.
         Ok(unsafe { WindowHandle::borrow_raw(self.window) })
     }
 }
 
 impl HasDisplayHandle for RawWinitWindow {
     fn display_handle(&self) -> std::result::Result<DisplayHandle<'_>, HandleError> {
+        // SAFETY: The borrowed handle cannot outlive RawWinitWindow.
         Ok(unsafe { DisplayHandle::borrow_raw(self.display) })
     }
 }
@@ -511,6 +561,7 @@ impl WinitWindow {
 
 impl Drop for WinitWindow {
     fn drop(&mut self) {
+        self.state.shutdown(false);
         let _ = self
             .command_sender
             .send(LoopCommand::CloseWindow(self.state.window.id()));
@@ -623,6 +674,7 @@ impl PlatformWindow for WinitWindow {
         _detail: Option<&str>,
         _answers: &[PromptButton],
     ) -> Option<oneshot::Receiver<usize>> {
+        // TODO(winit): Support native prompt dialogs.
         None
     }
 
@@ -649,15 +701,25 @@ impl PlatformWindow for WinitWindow {
     }
 
     fn set_background_appearance(&self, appearance: WindowBackgroundAppearance) {
-        self.state.background.set(appearance);
+        if self.state.closing.get() || self.state.background.replace(appearance) == appearance {
+            return;
+        }
         let transparent = appearance != WindowBackgroundAppearance::Opaque;
         let blurred = appearance == WindowBackgroundAppearance::Blurred;
+        if matches!(
+            appearance,
+            WindowBackgroundAppearance::MicaBackdrop | WindowBackgroundAppearance::MicaAltBackdrop
+        ) {
+            // TODO(winit): Apply native Windows Mica backdrops.
+        }
         self.state.window.set_transparent(transparent);
         self.state.window.set_blur(blurred);
-        self.state
-            .renderer
-            .borrow_mut()
-            .update_transparency(transparent);
+        if !self.state.gpu_recovery_pending.get() && !self.state.closing.get() {
+            self.state
+                .renderer
+                .borrow_mut()
+                .update_transparency(transparent);
+        }
     }
 
     fn minimize(&self) {
@@ -716,6 +778,7 @@ impl PlatformWindow for WinitWindow {
     }
 
     fn on_hit_test_window_control(&self, _callback: Box<dyn FnMut() -> Option<WindowControlArea>>) {
+        // TODO(winit): Support client-decoration window control hit testing.
     }
 
     fn on_close(&self, callback: Box<dyn FnOnce()>) {
@@ -727,13 +790,51 @@ impl PlatformWindow for WinitWindow {
     }
 
     fn draw(&self, scene: &Scene) {
+        let surface_size = self.state.window.surface_size();
+        if self.state.closing.get()
+            || self.state.occluded.get()
+            || surface_size.width == 0
+            || surface_size.height == 0
+        {
+            return;
+        }
+
         let mut renderer = self.state.renderer.borrow_mut();
-        if renderer.device_lost() {
-            if let Err(error) = renderer.recover(&self.state.raw_window) {
-                log::warn!("GPU recovery failed, will retry on next frame: {error}");
+        if renderer.device_lost() || self.state.gpu_recovery_pending.get() {
+            let now = Instant::now();
+            if self
+                .state
+                .gpu_recovery_after
+                .get()
+                .is_some_and(|retry_after| now < retry_after)
+            {
+                return;
             }
-            self.state.force_render_after_recovery.set(true);
-            self.state.window.request_redraw();
+
+            self.state.gpu_recovery_pending.set(true);
+            match renderer.recover(&self.state.raw_window) {
+                Ok(()) => {
+                    self.state.gpu_recovery_pending.set(false);
+                    self.state.gpu_recovery_failures.set(0);
+                    self.state.gpu_recovery_after.set(None);
+                    renderer.update_drawable_size(device_size(surface_size));
+                    renderer.update_transparency(
+                        self.state.background.get() != WindowBackgroundAppearance::Opaque,
+                    );
+                    self.state.force_render_after_recovery.set(true);
+                    self.state.window.request_redraw();
+                }
+                Err(error) => {
+                    let failures = self.state.gpu_recovery_failures.get().saturating_add(1);
+                    self.state.gpu_recovery_failures.set(failures);
+                    let delay = Duration::from_secs(1 << failures.saturating_sub(1).min(3));
+                    self.state.gpu_recovery_after.set(Some(now + delay));
+                    log::warn!(
+                        "GPU recovery failed; retrying in {}s: {error}",
+                        delay.as_secs()
+                    );
+                }
+            }
             return;
         }
 
@@ -761,15 +862,15 @@ impl PlatformWindow for WinitWindow {
 
     #[cfg(target_os = "windows")]
     fn get_raw_handle(&self) -> windows::Win32::Foundation::HWND {
-        let handle = self
-            .window_handle()
-            .expect("winit window handle unavailable");
-        match handle.as_raw() {
-            RawWindowHandle::Win32(handle) => {
-                windows::Win32::Foundation::HWND(handle.hwnd.get() as *mut c_void)
-            }
-            _ => unreachable!(),
-        }
+        let Ok(handle) = self.window_handle() else {
+            log::error!("winit window handle is unavailable");
+            return windows::Win32::Foundation::HWND::default();
+        };
+        let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+            log::error!("winit returned a non-Win32 handle on Windows");
+            return windows::Win32::Foundation::HWND::default();
+        };
+        windows::Win32::Foundation::HWND(handle.hwnd.get() as *mut c_void)
     }
 
     fn request_decorations(&self, decorations: gpui::WindowDecorations) {

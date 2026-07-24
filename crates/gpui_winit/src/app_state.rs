@@ -52,6 +52,7 @@ pub(crate) fn with_event_loop_scope<R>(
     callback: impl FnOnce() -> R,
 ) -> R {
     let pointer = event_loop as *const dyn ActiveEventLoop;
+    // SAFETY: The pointer is cleared by the scope guard before event_loop can expire.
     let pointer = unsafe {
         std::mem::transmute::<*const dyn ActiveEventLoop, ActiveEventLoopPointer>(pointer)
     };
@@ -65,6 +66,7 @@ pub(crate) fn with_active_event_loop<R>(
 ) -> Option<R> {
     ACTIVE_EVENT_LOOP.with(|active| {
         let pointer = active.get()?;
+        // SAFETY: with_event_loop_scope limits this pointer to the active callback.
         Some(unsafe { callback(&*pointer) })
     })
 }
@@ -122,12 +124,12 @@ impl WinitAppState {
         while let Ok(command) = self.command_receiver.try_recv() {
             match command {
                 LoopCommand::CloseWindow(window_id) => {
-                    self.remove_window(window_id);
+                    if let Some(state) = self.remove_window(window_id) {
+                        state.shutdown(false);
+                    }
                 }
                 LoopCommand::Quit => {
-                    let mut registry = self.registry.borrow_mut();
-                    registry.windows.clear();
-                    registry.active_window = None;
+                    self.shutdown_windows(true);
                     event_loop.exit();
                 }
             }
@@ -148,6 +150,22 @@ impl WinitAppState {
             registry.active_window = None;
         }
         state
+    }
+
+    fn shutdown_windows(&self, notify: bool) {
+        let windows = self
+            .registry
+            .borrow()
+            .windows
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for state in windows {
+            state.shutdown(notify);
+        }
+        let mut registry = self.registry.borrow_mut();
+        registry.windows.clear();
+        registry.active_window = None;
     }
 }
 
@@ -237,15 +255,18 @@ impl ApplicationHandler for WinitAppState {
                 WindowEvent::ThemeChanged(_) => {
                     state.appearance_changed();
                 }
+                WindowEvent::Occluded(occluded) => {
+                    state.set_occluded(occluded);
+                }
                 WindowEvent::CloseRequested => {
                     if state.should_close() {
-                        state.closed();
+                        state.shutdown(true);
                         self.remove_window(window_id);
                     }
                 }
                 WindowEvent::Destroyed => {
                     if self.remove_window(window_id).is_some() {
-                        state.closed();
+                        state.shutdown(true);
                     }
                 }
                 WindowEvent::RedrawRequested => {

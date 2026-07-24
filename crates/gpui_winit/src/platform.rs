@@ -114,16 +114,15 @@ impl Platform for WinitUnifiedPlatform {
     }
 
     fn run(&self, on_finish_launching: Box<dyn 'static + FnOnce()>) {
-        let event_loop = self
-            .event_loop
-            .borrow_mut()
-            .take()
-            .expect("winit application is already running");
-        let command_receiver = self
-            .command_receiver
-            .borrow_mut()
-            .take()
-            .expect("winit application is already running");
+        let Some(event_loop) = self.event_loop.borrow_mut().take() else {
+            log::error!("winit application is already running or has exited");
+            return;
+        };
+        let Some(command_receiver) = self.command_receiver.borrow_mut().take() else {
+            log::error!("winit command receiver is unavailable");
+            self.event_loop.borrow_mut().replace(event_loop);
+            return;
+        };
         let state = WinitAppState::new(
             self.registry.clone(),
             self.main_receiver.clone(),
@@ -136,11 +135,20 @@ impl Platform for WinitUnifiedPlatform {
             log::error!("winit event loop failed: {error}");
         }
 
-        {
-            let mut registry = self.registry.borrow_mut();
-            registry.windows.clear();
-            registry.active_window = None;
+        let windows = self
+            .registry
+            .borrow()
+            .windows
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for state in windows {
+            state.shutdown(true);
         }
+        let mut registry = self.registry.borrow_mut();
+        registry.windows.clear();
+        registry.active_window = None;
+        drop(registry);
 
         if let Some(mut callback) = self.callbacks.quit.take() {
             callback();
@@ -157,8 +165,9 @@ impl Platform for WinitUnifiedPlatform {
         if let Some(executable) = executable {
             let mut command = std::process::Command::new(executable);
             command.args(std::env::args_os().skip(1));
-            if command.spawn().is_ok() {
-                self.quit();
+            match command.spawn() {
+                Ok(_) => self.quit(),
+                Err(error) => log::error!("failed to restart application: {error}"),
             }
         }
     }
@@ -186,9 +195,13 @@ impl Platform for WinitUnifiedPlatform {
         }
     }
 
-    fn hide_other_apps(&self) {}
+    fn hide_other_apps(&self) {
+        // TODO(winit): Support hiding other applications where available.
+    }
 
-    fn unhide_other_apps(&self) {}
+    fn unhide_other_apps(&self) {
+        // TODO(winit): Support unhiding other applications where available.
+    }
 
     fn displays(&self) -> Vec<Rc<dyn PlatformDisplay>> {
         self.registry
@@ -259,9 +272,9 @@ impl Platform for WinitUnifiedPlatform {
             }
 
             if let Some(icon) = options.icon {
-                if let Ok(icon) = RgbaIcon::new(icon.as_raw().clone(), icon.width(), icon.height())
-                {
-                    attributes = attributes.with_window_icon(Some(icon.into()));
+                match RgbaIcon::new(icon.as_raw().clone(), icon.width(), icon.height()) {
+                    Ok(icon) => attributes = attributes.with_window_icon(Some(icon.into())),
+                    Err(error) => log::warn!("failed to create winit window icon: {error}"),
                 }
             }
 
@@ -304,7 +317,9 @@ impl Platform for WinitUnifiedPlatform {
         Self::window_appearance_from_theme(theme)
     }
 
-    fn open_url(&self, _url: &str) {}
+    fn open_url(&self, _url: &str) {
+        // TODO(winit): Open URLs with the system handler.
+    }
 
     fn on_open_urls(&self, callback: Box<dyn FnMut(Vec<String>)>) {
         self.callbacks.open_urls.set(Some(callback));
@@ -335,9 +350,13 @@ impl Platform for WinitUnifiedPlatform {
         false
     }
 
-    fn reveal_path(&self, _path: &Path) {}
+    fn reveal_path(&self, _path: &Path) {
+        // TODO(winit): Reveal paths in the system file manager.
+    }
 
-    fn open_with_system(&self, _path: &Path) {}
+    fn open_with_system(&self, _path: &Path) {
+        // TODO(winit): Open paths with the system handler.
+    }
 
     fn on_quit(&self, callback: Box<dyn FnMut()>) {
         self.callbacks.quit.set(Some(callback));
@@ -347,9 +366,13 @@ impl Platform for WinitUnifiedPlatform {
         self.callbacks.reopen.set(Some(callback));
     }
 
-    fn set_menus(&self, _menus: Vec<Menu>, _keymap: &Keymap) {}
+    fn set_menus(&self, _menus: Vec<Menu>, _keymap: &Keymap) {
+        // TODO(winit): Support native application menus.
+    }
 
-    fn set_dock_menu(&self, _menu: Vec<MenuItem>, _keymap: &Keymap) {}
+    fn set_dock_menu(&self, _menu: Vec<MenuItem>, _keymap: &Keymap) {
+        // TODO(winit): Support native dock menus where available.
+    }
 
     fn on_app_menu_action(&self, callback: Box<dyn FnMut(&dyn Action)>) {
         self.callbacks.app_menu_action.set(Some(callback));
@@ -404,10 +427,13 @@ impl Platform for WinitUnifiedPlatform {
     }
 
     fn read_from_clipboard(&self) -> Option<ClipboardItem> {
+        // TODO(winit): Read text and images from the system clipboard.
         None
     }
 
-    fn write_to_clipboard(&self, _item: ClipboardItem) {}
+    fn write_to_clipboard(&self, _item: ClipboardItem) {
+        // TODO(winit): Write text and images to the system clipboard.
+    }
 
     fn write_credentials(&self, _url: &str, _username: &str, _password: &[u8]) -> Task<Result<()>> {
         Task::ready(Err(anyhow!(
