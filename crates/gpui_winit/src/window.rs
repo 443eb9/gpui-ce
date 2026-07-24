@@ -9,12 +9,12 @@ use std::{
 use anyhow::Result;
 use futures::channel::oneshot;
 use gpui::{
-    Bounds, Capslock, Decorations, DevicePixels, DispatchEventResult, GpuSpecs, KeyDownEvent,
-    KeyUpEvent, Modifiers, ModifiersChangedEvent, MouseDownEvent, MouseExitEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler,
-    PlatformWindow, Point, PromptButton, PromptLevel, RequestFrameOptions, ResizeEdge, Scene,
-    ScrollDelta, ScrollWheelEvent, Size, WindowAppearance, WindowBackgroundAppearance,
-    WindowBounds, WindowControlArea,
+    Bounds, Capslock, Decorations, DevicePixels, DispatchEventResult, ExternalPaths, FileDropEvent,
+    GpuSpecs, KeyDownEvent, KeyUpEvent, Modifiers, ModifiersChangedEvent, MouseDownEvent,
+    MouseExitEvent, MouseMoveEvent, MouseUpEvent, Pixels, PlatformAtlas, PlatformDisplay,
+    PlatformInput, PlatformInputHandler, PlatformWindow, Point, PromptButton, PromptLevel,
+    RequestFrameOptions, ResizeEdge, Scene, ScrollDelta, ScrollWheelEvent, Size, WindowAppearance,
+    WindowBackgroundAppearance, WindowBounds, WindowControlArea,
 };
 use gpui_wgpu::{GpuContext, WgpuRenderer, WgpuSurfaceConfig, wgpu};
 use raw_window_handle::{
@@ -64,6 +64,7 @@ pub(crate) struct WindowState {
     input_handler: RefCell<Option<PlatformInputHandler>>,
     mouse_position: Cell<Point<Pixels>>,
     pressed_button: Cell<Option<gpui::MouseButton>>,
+    drag_paths: RefCell<Option<ExternalPaths>>,
     click_state: RefCell<ClickState>,
     modifiers: Cell<Modifiers>,
     capslock: Cell<Capslock>,
@@ -115,6 +116,7 @@ impl WindowState {
             input_handler: RefCell::new(None),
             mouse_position: Cell::new(Point::default()),
             pressed_button: Cell::new(None),
+            drag_paths: RefCell::new(None),
             click_state: RefCell::new(ClickState::default()),
             modifiers: Cell::new(current_modifiers()),
             capslock: Cell::new(current_capslock()),
@@ -345,6 +347,48 @@ impl WindowState {
         }));
     }
 
+    pub(crate) fn drag_entered(
+        &self,
+        paths: Vec<std::path::PathBuf>,
+        position: winit::dpi::PhysicalPosition<f64>,
+    ) {
+        let paths = ExternalPaths(paths.into_iter().collect());
+        self.drag_paths.borrow_mut().replace(paths.clone());
+        self.dispatch_input(PlatformInput::FileDrop(FileDropEvent::Entered {
+            position: logical_position(position, self.scale_factor()),
+            paths,
+        }));
+    }
+
+    pub(crate) fn drag_moved(&self, position: winit::dpi::PhysicalPosition<f64>) {
+        if self.drag_paths.borrow().is_none() {
+            return;
+        }
+        self.dispatch_input(PlatformInput::FileDrop(FileDropEvent::Pending {
+            position: logical_position(position, self.scale_factor()),
+        }));
+    }
+
+    pub(crate) fn drag_dropped(
+        &self,
+        paths: Vec<std::path::PathBuf>,
+        position: winit::dpi::PhysicalPosition<f64>,
+    ) {
+        self.drag_paths
+            .borrow_mut()
+            .replace(ExternalPaths(paths.into_iter().collect()));
+        self.dispatch_input(PlatformInput::FileDrop(FileDropEvent::Submit {
+            position: logical_position(position, self.scale_factor()),
+        }));
+        self.drag_paths.borrow_mut().take();
+    }
+
+    pub(crate) fn drag_left(&self) {
+        if self.drag_paths.borrow_mut().take().is_some() {
+            self.dispatch_input(PlatformInput::FileDrop(FileDropEvent::Exited));
+        }
+    }
+
     pub(crate) fn ime(&self, event: Ime) {
         match event {
             Ime::Enabled => {
@@ -413,6 +457,7 @@ impl WindowState {
         }
         self.renderer.borrow_mut().destroy();
         self.input_handler.borrow_mut().take();
+        self.drag_paths.borrow_mut().take();
         if notify && let Some(callback) = self.callbacks.close.take() {
             callback();
         }

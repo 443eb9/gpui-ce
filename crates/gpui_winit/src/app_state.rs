@@ -207,6 +207,18 @@ impl ApplicationHandler for WinitAppState {
                     self.refresh_displays(event_loop);
                     state.moved();
                 }
+                WindowEvent::DragEntered { paths, position } => {
+                    state.drag_entered(paths, position);
+                }
+                WindowEvent::DragMoved { position } => {
+                    state.drag_moved(position);
+                }
+                WindowEvent::DragDropped { paths, position } => {
+                    state.drag_dropped(paths, position);
+                }
+                WindowEvent::DragLeft { .. } => {
+                    state.drag_left();
+                }
                 WindowEvent::Focused(focused) => {
                     state.focused(focused);
                     let mut registry = self.registry.borrow_mut();

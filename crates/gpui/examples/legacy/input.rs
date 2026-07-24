@@ -691,10 +691,10 @@ fn main() {
             KeyBinding::new("right", Right, None),
             KeyBinding::new("shift-left", SelectLeft, None),
             KeyBinding::new("shift-right", SelectRight, None),
-            KeyBinding::new("cmd-a", SelectAll, None),
-            KeyBinding::new("cmd-v", Paste, None),
-            KeyBinding::new("cmd-c", Copy, None),
-            KeyBinding::new("cmd-x", Cut, None),
+            KeyBinding::new("secondary-a", SelectAll, None),
+            KeyBinding::new("secondary-v", Paste, None),
+            KeyBinding::new("secondary-c", Copy, None),
+            KeyBinding::new("secondary-x", Cut, None),
             KeyBinding::new("home", Home, None),
             KeyBinding::new("end", End, None),
             KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, None),
@@ -748,6 +748,6 @@ fn main() {
             })
             .unwrap();
         cx.on_action(|_: &Quit, cx| cx.quit());
-        cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
+        cx.bind_keys([KeyBinding::new("secondary-q", Quit, None)]);
     });
 }

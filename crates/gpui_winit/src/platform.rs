@@ -21,8 +21,10 @@ use winit::{
 
 use crate::{
     app_state::{LoopCommand, WindowRegistry, WinitAppState, with_active_event_loop},
+    clipboard::WinitClipboard,
     dispatcher::WinitDispatcher,
     keyboard::WinitKeyboardLayout,
+    system_open,
     window::{WindowState, WinitWindow},
 };
 
@@ -51,6 +53,7 @@ pub struct WinitUnifiedPlatform {
     gpu_context: gpui_wgpu::GpuContext,
     registry: Rc<RefCell<WindowRegistry>>,
     callbacks: Rc<PlatformCallbacks>,
+    clipboard: WinitClipboard,
     cursor_style: Cell<CursorStyle>,
     cursor_visible: Rc<Cell<bool>>,
 }
@@ -75,6 +78,7 @@ impl WinitUnifiedPlatform {
             gpu_context: Rc::new(RefCell::new(None)),
             registry: Rc::new(RefCell::new(WindowRegistry::default())),
             callbacks: Rc::new(PlatformCallbacks::default()),
+            clipboard: WinitClipboard::new(),
             cursor_style: Cell::new(CursorStyle::Arrow),
             cursor_visible: Rc::new(Cell::new(true)),
         }
@@ -90,6 +94,16 @@ impl WinitUnifiedPlatform {
         let (sender, receiver) = oneshot::channel();
         let _ = sender.send(Err(anyhow!("{operation} is not supported by gpui_winit")));
         receiver
+    }
+
+    fn run_system_operation(&self, operation: impl FnOnce() -> Result<()> + Send + 'static) {
+        self.background_executor
+            .spawn(async move {
+                if let Err(error) = operation() {
+                    log::error!("{error:#}");
+                }
+            })
+            .detach();
     }
 
     fn window_appearance_from_theme(theme: Option<Theme>) -> WindowAppearance {
@@ -317,8 +331,9 @@ impl Platform for WinitUnifiedPlatform {
         Self::window_appearance_from_theme(theme)
     }
 
-    fn open_url(&self, _url: &str) {
-        // TODO(winit): Open URLs with the system handler.
+    fn open_url(&self, url: &str) {
+        let url = url.to_owned();
+        self.run_system_operation(move || system_open::open_url(&url));
     }
 
     fn on_open_urls(&self, callback: Box<dyn FnMut(Vec<String>)>) {
@@ -350,12 +365,14 @@ impl Platform for WinitUnifiedPlatform {
         false
     }
 
-    fn reveal_path(&self, _path: &Path) {
-        // TODO(winit): Reveal paths in the system file manager.
+    fn reveal_path(&self, path: &Path) {
+        let path = path.to_owned();
+        self.run_system_operation(move || system_open::reveal_path(&path));
     }
 
-    fn open_with_system(&self, _path: &Path) {
-        // TODO(winit): Open paths with the system handler.
+    fn open_with_system(&self, path: &Path) {
+        let path = path.to_owned();
+        self.run_system_operation(move || system_open::open_path(&path));
     }
 
     fn on_quit(&self, callback: Box<dyn FnMut()>) {
@@ -427,12 +444,11 @@ impl Platform for WinitUnifiedPlatform {
     }
 
     fn read_from_clipboard(&self) -> Option<ClipboardItem> {
-        // TODO(winit): Read text and images from the system clipboard.
-        None
+        self.clipboard.read()
     }
 
-    fn write_to_clipboard(&self, _item: ClipboardItem) {
-        // TODO(winit): Write text and images to the system clipboard.
+    fn write_to_clipboard(&self, item: ClipboardItem) {
+        self.clipboard.write(item);
     }
 
     fn write_credentials(&self, _url: &str, _username: &str, _password: &[u8]) -> Task<Result<()>> {
