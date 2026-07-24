@@ -2725,6 +2725,10 @@ dependencies = [
  "futures",
  "gpui",
  "gpui_wgpu",
+ "log",
+ "raw-window-handle",
+ "uuid",
+ "windows 0.61.3",
  "winit",
 ]
 
