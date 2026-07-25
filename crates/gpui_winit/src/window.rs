@@ -76,6 +76,11 @@ pub(crate) struct WindowState {
     is_movable: bool,
     use_client_decorations: bool,
     force_render_after_recovery: Cell<bool>,
+    continuous_frames: Cell<bool>,
+    scheduled_redraw: Cell<bool>,
+    require_presentation: Cell<bool>,
+    presented_in_frame: Cell<bool>,
+    idle_frame_count: Cell<u8>,
     gpu_recovery_pending: Cell<bool>,
     gpu_recovery_failures: Cell<u32>,
     gpu_recovery_after: Cell<Option<Instant>>,
@@ -133,6 +138,11 @@ impl WindowState {
             is_movable,
             use_client_decorations,
             force_render_after_recovery: Cell::new(false),
+            continuous_frames: Cell::new(true),
+            scheduled_redraw: Cell::new(false),
+            require_presentation: Cell::new(true),
+            presented_in_frame: Cell::new(false),
+            idle_frame_count: Cell::new(0),
             gpu_recovery_pending: Cell::new(false),
             gpu_recovery_failures: Cell::new(0),
             gpu_recovery_after: Cell::new(None),
@@ -154,9 +164,50 @@ impl WindowState {
         }
     }
 
-    pub(crate) fn request_frame(&self) {
+    pub(crate) fn request_redraw(&self, require_presentation: bool) {
         let size = self.window.surface_size();
-        if self.closing.get() || self.occluded.get() || size.width == 0 || size.height == 0 {
+        if self.closing.get()
+            || self.occluded.get()
+            || size.width == 0
+            || size.height == 0
+            || !self.window.is_visible().unwrap_or(true)
+        {
+            return;
+        }
+        if require_presentation {
+            self.require_presentation.set(true);
+        }
+        self.idle_frame_count.set(0);
+        self.continuous_frames.set(true);
+        self.window.request_redraw();
+    }
+
+    pub(crate) fn should_schedule_frame(&self) -> bool {
+        let size = self.window.surface_size();
+        self.continuous_frames.get()
+            && !self.closing.get()
+            && !self.occluded.get()
+            && size.width > 0
+            && size.height > 0
+            && self.window.is_visible().unwrap_or(true)
+    }
+
+    pub(crate) fn schedule_frame(&self) -> bool {
+        if !self.should_schedule_frame() {
+            return false;
+        }
+        self.scheduled_redraw.set(true);
+        self.window.request_redraw();
+        true
+    }
+
+    pub(crate) fn redraw_requested(&self) {
+        if !self.scheduled_redraw.replace(false) {
+            self.require_presentation.set(true);
+            self.idle_frame_count.set(0);
+            self.continuous_frames.set(true);
+        }
+        if !self.should_schedule_frame() {
             return;
         }
         if self.gpu_recovery_pending.get()
@@ -167,12 +218,22 @@ impl WindowState {
         {
             return;
         }
+        self.presented_in_frame.set(false);
         if let Some(mut callback) = self.callbacks.request_frame.take() {
             callback(RequestFrameOptions {
-                require_presentation: true,
+                require_presentation: self.require_presentation.replace(false),
                 force_render: self.force_render_after_recovery.replace(false),
             });
             self.callbacks.request_frame.set(Some(callback));
+        }
+        if self.presented_in_frame.get() {
+            self.idle_frame_count.set(0);
+        } else {
+            let idle_frames = self.idle_frame_count.get().saturating_add(1);
+            self.idle_frame_count.set(idle_frames);
+            if idle_frames >= 3 {
+                self.continuous_frames.set(false);
+            }
         }
     }
 
@@ -188,10 +249,12 @@ impl WindowState {
         Self::invoke_mut(&self.callbacks.resize, |callback| {
             callback(size, scale_factor);
         });
+        self.request_redraw(true);
     }
 
     pub(crate) fn moved(&self) {
         Self::invoke_mut(&self.callbacks.moved, |callback| callback());
+        self.request_redraw(false);
     }
 
     pub(crate) fn focused(&self, focused: bool) {
@@ -204,6 +267,7 @@ impl WindowState {
         Self::invoke_mut(&self.callbacks.active_status_change, |callback| {
             callback(focused);
         });
+        self.request_redraw(false);
     }
 
     pub(crate) fn hovered(&self, hovered: bool) {
@@ -211,17 +275,19 @@ impl WindowState {
             Self::invoke_mut(&self.callbacks.hover_status_change, |callback| {
                 callback(hovered);
             });
+            self.request_redraw(false);
         }
     }
 
     pub(crate) fn appearance_changed(&self) {
         Self::invoke_mut(&self.callbacks.appearance_changed, |callback| callback());
+        self.request_redraw(true);
     }
 
     pub(crate) fn set_occluded(&self, occluded: bool) {
         self.occluded.set(occluded);
         if !occluded && !self.closing.get() {
-            self.window.request_redraw();
+            self.request_redraw(true);
         }
     }
 
@@ -450,6 +516,7 @@ impl WindowState {
                 // TODO(winit): Apply IME surrounding-text deletion.
             }
         }
+        self.request_redraw(false);
     }
 
     pub(crate) fn should_close(&self) -> bool {
@@ -464,6 +531,7 @@ impl WindowState {
         if self.closing.replace(true) {
             return;
         }
+        self.continuous_frames.set(false);
         self.renderer.borrow_mut().destroy();
         self.input_handler.borrow_mut().take();
         self.drag_paths.borrow_mut().take();
@@ -491,6 +559,7 @@ impl WindowState {
         };
         let result = callback(input);
         self.callbacks.input.set(Some(callback));
+        self.request_redraw(false);
         result
     }
 
@@ -887,7 +956,7 @@ impl PlatformWindow for WinitWindow {
                         self.state.background.get() != WindowBackgroundAppearance::Opaque,
                     );
                     self.state.force_render_after_recovery.set(true);
-                    self.state.window.request_redraw();
+                    self.state.request_redraw(true);
                 }
                 Err(error) => {
                     let failures = self.state.gpu_recovery_failures.get().saturating_add(1);
@@ -903,13 +972,14 @@ impl PlatformWindow for WinitWindow {
             return;
         }
 
+        self.state.presented_in_frame.set(true);
         self.state.window.pre_present_notify();
         if !renderer.draw(scene) {
-            self.state.window.request_redraw();
+            self.state.request_redraw(true);
         }
         if renderer.needs_redraw() {
             self.state.force_render_after_recovery.set(true);
-            self.state.window.request_redraw();
+            self.state.request_redraw(true);
         }
     }
 

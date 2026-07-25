@@ -3,6 +3,7 @@ use std::{
     collections::{HashMap, HashSet},
     rc::Rc,
     sync::mpsc::Receiver,
+    time::{Duration, Instant},
 };
 
 use gpui::{AnyWindowHandle, PriorityQueueReceiver, RunnableVariant};
@@ -131,6 +132,7 @@ pub(crate) struct WinitAppState {
     command_receiver: Receiver<LoopCommand>,
     on_finish_launching: Option<Box<dyn FnOnce()>>,
     headless: bool,
+    next_frame_at: Instant,
 }
 
 impl WinitAppState {
@@ -147,6 +149,7 @@ impl WinitAppState {
             command_receiver,
             on_finish_launching: Some(on_finish_launching),
             headless,
+            next_frame_at: Instant::now(),
         }
     }
 
@@ -154,8 +157,10 @@ impl WinitAppState {
         refresh_displays(&self.registry, event_loop);
     }
 
-    fn drain_queues(&mut self, event_loop: &dyn ActiveEventLoop) {
+    fn drain_queues(&mut self, event_loop: &dyn ActiveEventLoop) -> bool {
+        let mut ran_main_task = false;
         while let Ok(Some(runnable)) = self.main_receiver.try_pop() {
+            ran_main_task = true;
             execute_runnable(runnable);
         }
 
@@ -171,6 +176,20 @@ impl WinitAppState {
                     event_loop.exit();
                 }
             }
+        }
+        ran_main_task
+    }
+
+    fn request_window_frames(&self, require_presentation: bool) {
+        let windows = self
+            .registry
+            .borrow()
+            .windows
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for state in windows {
+            state.request_redraw(require_presentation);
         }
     }
 
@@ -220,11 +239,7 @@ impl ApplicationHandler for WinitAppState {
     }
 
     fn can_create_surfaces(&mut self, event_loop: &dyn ActiveEventLoop) {
-        event_loop.set_control_flow(if self.headless {
-            ControlFlow::Wait
-        } else {
-            ControlFlow::Poll
-        });
+        event_loop.set_control_flow(ControlFlow::Wait);
         with_event_loop_scope(event_loop, || {
             self.refresh_displays(event_loop);
             if let Some(callback) = self.on_finish_launching.take() {
@@ -234,7 +249,11 @@ impl ApplicationHandler for WinitAppState {
     }
 
     fn proxy_wake_up(&mut self, event_loop: &dyn ActiveEventLoop) {
-        with_event_loop_scope(event_loop, || self.drain_queues(event_loop));
+        with_event_loop_scope(event_loop, || {
+            if self.drain_queues(event_loop) {
+                self.request_window_frames(false);
+            }
+        });
     }
 
     fn window_event(
@@ -336,7 +355,7 @@ impl ApplicationHandler for WinitAppState {
                     }
                 }
                 WindowEvent::RedrawRequested => {
-                    state.request_frame();
+                    state.redraw_requested();
                 }
                 _ => {}
             }
@@ -345,8 +364,17 @@ impl ApplicationHandler for WinitAppState {
 
     fn about_to_wait(&mut self, event_loop: &dyn ActiveEventLoop) {
         with_event_loop_scope(event_loop, || {
-            self.drain_queues(event_loop);
-            if !self.headless {
+            if self.drain_queues(event_loop) {
+                self.request_window_frames(false);
+            }
+            if self.headless {
+                event_loop.set_control_flow(ControlFlow::Wait);
+                return;
+            }
+
+            let now = Instant::now();
+            if now >= self.next_frame_at {
+                self.next_frame_at = now + Duration::from_micros(16_667);
                 let windows = self
                     .registry
                     .borrow()
@@ -355,9 +383,21 @@ impl ApplicationHandler for WinitAppState {
                     .cloned()
                     .collect::<Vec<_>>();
                 for state in windows {
-                    state.window.request_redraw();
+                    state.schedule_frame();
                 }
             }
+
+            let has_continuous_frames = self
+                .registry
+                .borrow()
+                .windows
+                .values()
+                .any(|state| state.should_schedule_frame());
+            event_loop.set_control_flow(if has_continuous_frames {
+                ControlFlow::WaitUntil(self.next_frame_at)
+            } else {
+                ControlFlow::Wait
+            });
         });
     }
 }

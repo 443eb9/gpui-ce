@@ -220,10 +220,12 @@ impl Platform for WinitUnifiedPlatform {
         };
         for state in windows_to_restore {
             state.window.set_visible(true);
+            state.request_redraw(true);
         }
         if let Some(state) = state_to_focus {
             state.window.set_visible(true);
             state.window.focus_window();
+            state.request_redraw(true);
         }
     }
 
@@ -403,7 +405,7 @@ impl Platform for WinitUnifiedPlatform {
                 .borrow_mut()
                 .windows
                 .insert(window_id, state.clone());
-            state.window.request_redraw();
+            state.request_redraw(true);
 
             Ok(Box::new(WinitWindow::new(
                 state,
