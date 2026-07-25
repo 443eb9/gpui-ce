@@ -16,7 +16,7 @@ use gpui::{
     RequestFrameOptions, ResizeEdge, Scene, ScrollDelta, ScrollWheelEvent, Size, WindowAppearance,
     WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowKind,
 };
-use gpui_wgpu::{GpuContext, WgpuRenderer, WgpuSurfaceConfig, wgpu};
+use gpui_wgpu::{GpuContext, WgpuDeviceRequirements, WgpuRenderer, WgpuSurfaceConfig, wgpu};
 use raw_window_handle::{
     DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle,
     RawWindowHandle, WindowHandle,
@@ -102,6 +102,7 @@ impl WindowState {
         is_movable: bool,
         use_client_decorations: bool,
         gpu_context: GpuContext,
+        gpu_requirements: Option<WgpuDeviceRequirements>,
     ) -> Result<Rc<Self>> {
         let raw_window = RawWinitWindow::new(window.as_ref())?;
         let physical_size = window.surface_size();
@@ -114,7 +115,7 @@ impl WindowState {
                 preferred_present_mode: Some(wgpu::PresentMode::Fifo),
             },
             None,
-            None,
+            gpu_requirements,
         )?;
 
         let state = Rc::new(Self {
@@ -1048,6 +1049,11 @@ impl PlatformWindow for WinitWindow {
 
     fn gpu_specs(&self) -> Option<GpuSpecs> {
         Some(self.state.renderer.borrow().gpu_specs())
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
+    fn gpu_context(&self) -> Option<Box<dyn std::any::Any>> {
+        Some(Box::new(self.state.renderer.borrow().gpu_context()))
     }
 
     fn update_ime_position(&self, bounds: Bounds<Pixels>) {

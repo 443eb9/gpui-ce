@@ -53,6 +53,7 @@ pub struct WinitUnifiedPlatform {
     foreground_executor: ForegroundExecutor,
     text_system: Arc<dyn PlatformTextSystem>,
     gpu_context: gpui_wgpu::GpuContext,
+    gpu_requirements: RefCell<Option<gpui_wgpu::WgpuDeviceRequirements>>,
     registry: Rc<RefCell<WindowRegistry>>,
     callbacks: Rc<PlatformCallbacks>,
     clipboard: WinitClipboard,
@@ -78,6 +79,7 @@ impl WinitUnifiedPlatform {
             foreground_executor: ForegroundExecutor::new(dispatcher),
             text_system: Arc::new(gpui_wgpu::CosmicTextSystem::new("Segoe UI")),
             gpu_context: Rc::new(RefCell::new(None)),
+            gpu_requirements: RefCell::new(None),
             registry: Rc::new(RefCell::new(WindowRegistry::default())),
             callbacks: Rc::new(PlatformCallbacks::default()),
             clipboard: WinitClipboard::new(),
@@ -281,6 +283,21 @@ impl Platform for WinitUnifiedPlatform {
         self.registry.borrow().active_window
     }
 
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
+    fn set_gpu_requirements(&self, requirements: Box<dyn std::any::Any>) {
+        let Ok(requirements) = requirements.downcast::<gpui_wgpu::WgpuDeviceRequirements>() else {
+            log::warn!("set_gpu_requirements: unexpected type, expected WgpuDeviceRequirements");
+            return;
+        };
+
+        if self.gpu_context.borrow().is_some() {
+            log::warn!("set_gpu_requirements must be called before opening the first window");
+            return;
+        }
+
+        *self.gpu_requirements.borrow_mut() = Some(*requirements);
+    }
+
     fn open_window(
         &self,
         handle: AnyWindowHandle,
@@ -398,6 +415,7 @@ impl Platform for WinitUnifiedPlatform {
                 options.is_movable,
                 use_client_decorations,
                 self.gpu_context.clone(),
+                self.gpu_requirements.borrow().clone(),
             )?;
             state.set_cursor(self.cursor_style.get());
             let window_id = state.window.id();

@@ -19,7 +19,7 @@ path = "src/gpui_winit.rs"
 anyhow.workspace = true
 arboard.workspace = true
 futures.workspace = true
-gpui.workspace = true
+gpui = { workspace = true, features = ["wgpu"] }
 gpui_wgpu.workspace = true
 image.workspace = true
 log.workspace = true
