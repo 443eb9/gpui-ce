@@ -6,7 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use gpui::{AnyWindowHandle, PriorityQueueReceiver, RunnableVariant};
+use gpui::{AnyWindowHandle, PriorityQueueReceiver, RunnableVariant, WindowControlArea};
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
@@ -332,7 +332,21 @@ impl ApplicationHandler for WinitAppState {
                     button,
                     ..
                 } => {
-                    state.pointer_button(button_state, position, button);
+                    if let Some(control) = state.pointer_button(button_state, position, button) {
+                        match control {
+                            WindowControlArea::Close => {
+                                if state.should_close() {
+                                    state.shutdown(true);
+                                    self.remove_window(window_id);
+                                }
+                            }
+                            WindowControlArea::Max => {
+                                state.window.set_maximized(!state.window.is_maximized());
+                            }
+                            WindowControlArea::Min => state.window.set_minimized(true),
+                            WindowControlArea::Drag => {}
+                        }
+                    }
                 }
                 WindowEvent::MouseWheel { delta, phase, .. } => {
                     state.mouse_wheel(delta, phase);

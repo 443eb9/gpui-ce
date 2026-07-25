@@ -21,6 +21,14 @@ use raw_window_handle::{
     DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle,
     RawWindowHandle, WindowHandle,
 };
+#[cfg(target_os = "windows")]
+use windows::Win32::{
+    Foundation::{HWND, LPARAM, POINT, WPARAM},
+    UI::WindowsAndMessaging::{
+        GetCursorPos, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTLEFT, HTRIGHT, HTTOP,
+        HTTOPLEFT, HTTOPRIGHT, MSG, PM_REMOVE, PeekMessageW, PostMessageW, WM_NCLBUTTONDOWN,
+    },
+};
 use winit::{
     cursor::CursorIcon,
     dpi::{LogicalPosition, LogicalSize},
@@ -64,6 +72,7 @@ pub(crate) struct WindowState {
     input_handler: RefCell<Option<PlatformInputHandler>>,
     mouse_position: Cell<Point<Pixels>>,
     pressed_button: Cell<Option<gpui::MouseButton>>,
+    pressed_window_control: Cell<Option<WindowControlArea>>,
     drag_paths: RefCell<Option<ExternalPaths>>,
     click_state: RefCell<ClickState>,
     modifiers: Cell<Modifiers>,
@@ -128,6 +137,7 @@ impl WindowState {
             input_handler: RefCell::new(None),
             mouse_position: Cell::new(Point::default()),
             pressed_button: Cell::new(None),
+            pressed_window_control: Cell::new(None),
             drag_paths: RefCell::new(None),
             click_state: RefCell::new(ClickState::default()),
             modifiers: Cell::new(current_modifiers()),
@@ -264,6 +274,7 @@ impl WindowState {
             self.modifiers_changed(current_modifiers(), current_capslock());
         } else {
             self.pressed_button.set(None);
+            self.pressed_window_control.set(None);
         }
         Self::invoke_mut(&self.callbacks.active_status_change, |callback| {
             callback(focused);
@@ -374,9 +385,9 @@ impl WindowState {
         state: ElementState,
         position: winit::dpi::PhysicalPosition<f64>,
         button: winit::event::ButtonSource,
-    ) {
+    ) -> Option<WindowControlArea> {
         let Some(button) = mouse_button_from_winit(button) else {
-            return;
+            return None;
         };
         let position = logical_position(position, self.scale_factor());
         self.mouse_position.set(position);
@@ -386,13 +397,25 @@ impl WindowState {
             ElementState::Pressed => {
                 self.pressed_button.set(Some(button));
                 let click_count = self.click_state.borrow_mut().update(button, position);
-                self.dispatch_input(PlatformInput::MouseDown(MouseDownEvent {
+                let result = self.dispatch_input(PlatformInput::MouseDown(MouseDownEvent {
                     button,
                     position,
                     modifiers,
                     click_count,
                     first_mouse: false,
                 }));
+                if button == gpui::MouseButton::Left {
+                    let control = self.hit_test_window_control();
+                    self.pressed_window_control.set(control);
+                    #[cfg(target_os = "windows")]
+                    if control == Some(WindowControlArea::Drag)
+                        && result.propagate
+                        && !result.default_prevented
+                    {
+                        self.start_window_move();
+                    }
+                }
+                None
             }
             ElementState::Released => {
                 self.pressed_button.set(None);
@@ -403,7 +426,69 @@ impl WindowState {
                     modifiers,
                     click_count,
                 }));
+                if button != gpui::MouseButton::Left {
+                    return None;
+                }
+
+                let pressed_control = self.pressed_window_control.take();
+                let released_control = self.hit_test_window_control();
+                pressed_control.filter(|pressed| Some(*pressed) == released_control)
             }
+        }
+    }
+
+    fn hit_test_window_control(&self) -> Option<WindowControlArea> {
+        let mut area = None;
+        Self::invoke_mut(&self.callbacks.hit_test_window_control, |callback| {
+            area = callback();
+        });
+        area
+    }
+
+    fn start_window_move(&self) {
+        if !self.is_movable
+            || matches!(
+                self.pressed_window_control.get(),
+                Some(WindowControlArea::Close | WindowControlArea::Max | WindowControlArea::Min)
+            )
+        {
+            return;
+        }
+        let _ = self.window.drag_window();
+        #[cfg(target_os = "windows")]
+        self.post_valid_window_drag_message(HTCAPTION);
+    }
+
+    #[cfg(target_os = "windows")]
+    fn post_valid_window_drag_message(&self, hit_test: u32) {
+        let RawWindowHandle::Win32(handle) = self.raw_window.window else {
+            return;
+        };
+        let hwnd = HWND(handle.hwnd.get() as *mut c_void);
+        let mut cursor = POINT::default();
+        unsafe {
+            if GetCursorPos(&mut cursor).is_err() {
+                return;
+            }
+
+            // winit 0.31.0-beta.2 posts a pointer to POINTS as lParam instead of the
+            // packed screen coordinates expected by WM_NCLBUTTONDOWN. Replace that queued
+            // message while retaining Winit's private state used to synthesize MouseUp.
+            let mut malformed_message = MSG::default();
+            let _ = PeekMessageW(
+                &mut malformed_message,
+                Some(hwnd),
+                WM_NCLBUTTONDOWN,
+                WM_NCLBUTTONDOWN,
+                PM_REMOVE,
+            );
+            let position = (cursor.x as u32 & 0xffff) | ((cursor.y as u32 & 0xffff) << 16);
+            let _ = PostMessageW(
+                Some(hwnd),
+                WM_NCLBUTTONDOWN,
+                WPARAM(hit_test as usize),
+                LPARAM(position as isize),
+            );
         }
     }
 
@@ -913,7 +998,6 @@ impl PlatformWindow for WinitWindow {
             .callbacks
             .hit_test_window_control
             .set(Some(callback));
-        // TODO(winit): Winit does not expose native non-client hit testing.
     }
 
     fn on_close(&self, callback: Box<dyn FnOnce()>) {
@@ -1017,10 +1101,7 @@ impl PlatformWindow for WinitWindow {
     }
 
     fn start_window_move(&self) {
-        if self.state.is_movable {
-            let _ = self.state.window.drag_window();
-        }
-        // TODO(winit): Native titlebar movement cannot be disabled through winit.
+        self.state.start_window_move();
     }
 
     fn start_window_resize(&self, edge: ResizeEdge) {
@@ -1035,6 +1116,17 @@ impl PlatformWindow for WinitWindow {
             ResizeEdge::TopLeft => ResizeDirection::NorthWest,
         };
         let _ = self.state.window.drag_resize_window(direction);
+        #[cfg(target_os = "windows")]
+        self.state.post_valid_window_drag_message(match direction {
+            ResizeDirection::North => HTTOP,
+            ResizeDirection::NorthEast => HTTOPRIGHT,
+            ResizeDirection::East => HTRIGHT,
+            ResizeDirection::SouthEast => HTBOTTOMRIGHT,
+            ResizeDirection::South => HTBOTTOM,
+            ResizeDirection::SouthWest => HTBOTTOMLEFT,
+            ResizeDirection::West => HTLEFT,
+            ResizeDirection::NorthWest => HTTOPLEFT,
+        });
     }
 
     fn window_decorations(&self) -> Decorations {
