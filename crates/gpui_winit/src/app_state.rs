@@ -1,6 +1,6 @@
 use std::{
     cell::{Cell, RefCell},
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     rc::Rc,
     sync::mpsc::Receiver,
 };
@@ -29,8 +29,12 @@ pub(crate) enum LoopCommand {
 pub(crate) struct WindowRegistry {
     pub(crate) windows: HashMap<WindowId, Rc<WindowState>>,
     pub(crate) displays: Vec<Rc<WinitDisplay>>,
+    pub(crate) display_ids: HashMap<uuid::Uuid, gpui::DisplayId>,
+    pub(crate) native_display_ids: HashMap<u64, gpui::DisplayId>,
     pub(crate) primary_display: Option<gpui::DisplayId>,
     pub(crate) active_window: Option<AnyWindowHandle>,
+    pub(crate) last_active_window: Option<AnyWindowHandle>,
+    pub(crate) hidden_windows: Vec<AnyWindowHandle>,
 }
 
 type ActiveEventLoopPointer = *const (dyn ActiveEventLoop + 'static);
@@ -71,6 +75,56 @@ pub(crate) fn with_active_event_loop<R>(
     })
 }
 
+pub(crate) fn refresh_displays(
+    registry: &Rc<RefCell<WindowRegistry>>,
+    event_loop: &dyn ActiveEventLoop,
+) {
+    let primary_uuid = event_loop
+        .primary_monitor()
+        .map(|monitor| WinitDisplay::uuid_for_monitor(&monitor));
+    let monitors = event_loop.available_monitors().collect::<Vec<_>>();
+    let mut registry = registry.borrow_mut();
+    let mut used_ids = registry
+        .display_ids
+        .values()
+        .copied()
+        .collect::<HashSet<_>>();
+    let mut displays = Vec::with_capacity(monitors.len());
+    let mut primary_display = None;
+
+    for monitor in monitors {
+        let uuid = WinitDisplay::uuid_for_monitor(&monitor);
+        let native_id = monitor.native_id();
+        let id = registry
+            .display_ids
+            .get(&uuid)
+            .copied()
+            .or_else(|| registry.native_display_ids.get(&native_id).copied())
+            .unwrap_or_else(|| {
+                let mut candidate = native_id;
+                if candidate == 0 || used_ids.contains(&gpui::DisplayId::new(candidate)) {
+                    let mut uuid_prefix = [0; 8];
+                    uuid_prefix.copy_from_slice(&uuid.as_bytes()[..8]);
+                    candidate = u64::from_le_bytes(uuid_prefix).max(1);
+                    while used_ids.contains(&gpui::DisplayId::new(candidate)) {
+                        candidate = candidate.wrapping_add(1).max(1);
+                    }
+                }
+                gpui::DisplayId::new(candidate)
+            });
+        used_ids.insert(id);
+        registry.display_ids.insert(uuid, id);
+        registry.native_display_ids.insert(native_id, id);
+        if Some(uuid) == primary_uuid {
+            primary_display = Some(id);
+        }
+        displays.push(WinitDisplay::from_monitor(&monitor, id));
+    }
+
+    registry.displays = displays;
+    registry.primary_display = primary_display;
+}
+
 pub(crate) struct WinitAppState {
     registry: Rc<RefCell<WindowRegistry>>,
     main_receiver: PriorityQueueReceiver<RunnableVariant>,
@@ -97,23 +151,7 @@ impl WinitAppState {
     }
 
     fn refresh_displays(&self, event_loop: &dyn ActiveEventLoop) {
-        let primary_id = event_loop.primary_monitor().map(|monitor| monitor.id());
-        let displays = event_loop
-            .available_monitors()
-            .map(|monitor| {
-                let source_id = monitor.id();
-                (source_id, WinitDisplay::from_monitor(&monitor))
-            })
-            .collect::<Vec<_>>();
-        let primary_display = primary_id.and_then(|primary_id| {
-            displays
-                .iter()
-                .find(|(source_id, _)| *source_id == primary_id)
-                .map(|(_, display)| gpui::PlatformDisplay::id(display.as_ref()))
-        });
-        let mut registry = self.registry.borrow_mut();
-        registry.displays = displays.into_iter().map(|(_, display)| display).collect();
-        registry.primary_display = primary_display;
+        refresh_displays(&self.registry, event_loop);
     }
 
     fn drain_queues(&mut self, event_loop: &dyn ActiveEventLoop) {
@@ -143,11 +181,16 @@ impl WinitAppState {
     fn remove_window(&self, window_id: WindowId) -> Option<Rc<WindowState>> {
         let mut registry = self.registry.borrow_mut();
         let state = registry.windows.remove(&window_id);
-        if state
-            .as_ref()
-            .is_some_and(|state| registry.active_window == Some(state.handle))
-        {
-            registry.active_window = None;
+        if let Some(state) = state.as_ref() {
+            if registry.active_window == Some(state.handle) {
+                registry.active_window = None;
+            }
+            if registry.last_active_window == Some(state.handle) {
+                registry.last_active_window = None;
+            }
+            registry
+                .hidden_windows
+                .retain(|handle| *handle != state.handle);
         }
         state
     }
@@ -166,10 +209,16 @@ impl WinitAppState {
         let mut registry = self.registry.borrow_mut();
         registry.windows.clear();
         registry.active_window = None;
+        registry.last_active_window = None;
+        registry.hidden_windows.clear();
     }
 }
 
 impl ApplicationHandler for WinitAppState {
+    fn resumed(&mut self, event_loop: &dyn ActiveEventLoop) {
+        with_event_loop_scope(event_loop, || self.refresh_displays(event_loop));
+    }
+
     fn can_create_surfaces(&mut self, event_loop: &dyn ActiveEventLoop) {
         event_loop.set_control_flow(if self.headless {
             ControlFlow::Wait
@@ -200,7 +249,11 @@ impl ApplicationHandler for WinitAppState {
             };
 
             match event {
-                WindowEvent::SurfaceResized(_) | WindowEvent::ScaleFactorChanged { .. } => {
+                WindowEvent::SurfaceResized(_) => {
+                    state.resized();
+                }
+                WindowEvent::ScaleFactorChanged { .. } => {
+                    self.refresh_displays(event_loop);
                     state.resized();
                 }
                 WindowEvent::Moved(_) => {
@@ -224,6 +277,7 @@ impl ApplicationHandler for WinitAppState {
                     let mut registry = self.registry.borrow_mut();
                     if focused {
                         registry.active_window = Some(state.handle);
+                        registry.last_active_window = Some(state.handle);
                     } else if registry.active_window == Some(state.handle) {
                         registry.active_window = None;
                     }

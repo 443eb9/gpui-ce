@@ -12,9 +12,7 @@ pub(crate) struct WinitDisplay {
 }
 
 impl WinitDisplay {
-    pub(crate) fn from_monitor(monitor: &MonitorHandle) -> Rc<Self> {
-        let monitor_id = monitor.id();
-        let id = DisplayId::new((monitor_id as u64) ^ ((monitor_id >> 64) as u64));
+    pub(crate) fn from_monitor(monitor: &MonitorHandle, id: DisplayId) -> Rc<Self> {
         let scale_factor = monitor.scale_factor() as f32;
         let position = monitor.position().unwrap_or_default();
         let physical_size = monitor
@@ -31,20 +29,36 @@ impl WinitDisplay {
                 gpui::px(physical_size.height as f32 / scale_factor),
             ),
         );
-        let fingerprint = format!(
-            "{}|{}|{:?}|{:?}|{}",
-            monitor.id(),
-            monitor.native_id(),
-            monitor.name(),
-            monitor.position(),
-            monitor.scale_factor()
-        );
 
         Rc::new(Self {
             id,
-            uuid: Uuid::new_v5(&Uuid::NAMESPACE_OID, fingerprint.as_bytes()),
+            uuid: Self::uuid_for_monitor(monitor),
             bounds,
         })
+    }
+
+    pub(crate) fn uuid_for_monitor(monitor: &MonitorHandle) -> Uuid {
+        let mut fingerprint = Vec::new();
+        if let Some(name) = monitor.name().filter(|name| !name.is_empty()) {
+            fingerprint.extend_from_slice(name.as_bytes());
+        } else {
+            fingerprint.extend_from_slice(&monitor.native_id().to_le_bytes());
+            if let Some(position) = monitor.position() {
+                fingerprint.extend_from_slice(&position.x.to_le_bytes());
+                fingerprint.extend_from_slice(&position.y.to_le_bytes());
+            }
+            if let Some(mode) = monitor.current_video_mode() {
+                let size = mode.size();
+                fingerprint.extend_from_slice(&size.width.to_le_bytes());
+                fingerprint.extend_from_slice(&size.height.to_le_bytes());
+            }
+            fingerprint.extend_from_slice(&monitor.scale_factor().to_bits().to_le_bytes());
+        }
+        Uuid::new_v5(&Uuid::NAMESPACE_OID, &fingerprint)
+    }
+
+    pub(crate) fn matches_monitor(&self, monitor: &MonitorHandle) -> bool {
+        self.uuid == Self::uuid_for_monitor(monitor)
     }
 }
 
@@ -58,6 +72,11 @@ impl PlatformDisplay for WinitDisplay {
     }
 
     fn bounds(&self) -> Bounds<Pixels> {
+        self.bounds
+    }
+
+    fn visible_bounds(&self) -> Bounds<Pixels> {
+        // TODO(winit): Monitor work areas are not exposed by winit.
         self.bounds
     }
 }

@@ -14,7 +14,7 @@ use gpui::{
     MouseExitEvent, MouseMoveEvent, MouseUpEvent, Pixels, PlatformAtlas, PlatformDisplay,
     PlatformInput, PlatformInputHandler, PlatformWindow, Point, PromptButton, PromptLevel,
     RequestFrameOptions, ResizeEdge, Scene, ScrollDelta, ScrollWheelEvent, Size, WindowAppearance,
-    WindowBackgroundAppearance, WindowBounds, WindowControlArea,
+    WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowKind,
 };
 use gpui_wgpu::{GpuContext, WgpuRenderer, WgpuSurfaceConfig, wgpu};
 use raw_window_handle::{
@@ -34,8 +34,7 @@ use winit::{
 };
 
 use crate::{
-    app_state::LoopCommand,
-    display::WinitDisplay,
+    app_state::{LoopCommand, WindowRegistry},
     input::{
         ClickState, current_capslock, current_modifiers, keystroke_from_winit, logical_position,
         mouse_button_from_winit, touch_phase_from_winit, utf8_cursor_to_utf16,
@@ -51,6 +50,7 @@ struct WindowCallbacks {
     resize: Cell<Option<Box<dyn FnMut(Size<Pixels>, f32)>>>,
     moved: Cell<Option<Box<dyn FnMut()>>>,
     should_close: Cell<Option<Box<dyn FnMut() -> bool>>>,
+    hit_test_window_control: Cell<Option<Box<dyn FnMut() -> Option<WindowControlArea>>>>,
     close: Cell<Option<Box<dyn FnOnce()>>>,
     appearance_changed: Cell<Option<Box<dyn FnMut()>>>,
 }
@@ -72,6 +72,9 @@ pub(crate) struct WindowState {
     hovered: Cell<bool>,
     background: Cell<WindowBackgroundAppearance>,
     title: RefCell<String>,
+    kind: WindowKind,
+    is_movable: bool,
+    use_client_decorations: bool,
     force_render_after_recovery: Cell<bool>,
     gpu_recovery_pending: Cell<bool>,
     gpu_recovery_failures: Cell<u32>,
@@ -90,6 +93,9 @@ impl WindowState {
         handle: gpui::AnyWindowHandle,
         cursor_visible: Rc<Cell<bool>>,
         title: String,
+        kind: WindowKind,
+        is_movable: bool,
+        use_client_decorations: bool,
         gpu_context: GpuContext,
     ) -> Result<Rc<Self>> {
         let raw_window = RawWinitWindow::new(window.as_ref())?;
@@ -123,6 +129,9 @@ impl WindowState {
             hovered: Cell::new(false),
             background: Cell::new(WindowBackgroundAppearance::Opaque),
             title: RefCell::new(title),
+            kind,
+            is_movable,
+            use_client_decorations,
             force_render_after_recovery: Cell::new(false),
             gpu_recovery_pending: Cell::new(false),
             gpu_recovery_failures: Cell::new(0),
@@ -586,6 +595,7 @@ impl HasDisplayHandle for RawWinitWindow {
 
 pub(crate) struct WinitWindow {
     state: Rc<WindowState>,
+    registry: Rc<RefCell<WindowRegistry>>,
     command_sender: std::sync::mpsc::Sender<LoopCommand>,
     proxy: EventLoopProxy,
 }
@@ -593,11 +603,13 @@ pub(crate) struct WinitWindow {
 impl WinitWindow {
     pub(crate) fn new(
         state: Rc<WindowState>,
+        registry: Rc<RefCell<WindowRegistry>>,
         command_sender: std::sync::mpsc::Sender<LoopCommand>,
         proxy: EventLoopProxy,
     ) -> Self {
         Self {
             state,
+            registry,
             command_sender,
             proxy,
         }
@@ -686,10 +698,14 @@ impl PlatformWindow for WinitWindow {
     }
 
     fn display(&self) -> Option<Rc<dyn PlatformDisplay>> {
-        self.state
-            .window
-            .current_monitor()
-            .map(|monitor| WinitDisplay::from_monitor(&monitor) as Rc<dyn PlatformDisplay>)
+        let monitor = self.state.window.current_monitor()?;
+        self.registry
+            .borrow()
+            .displays
+            .iter()
+            .find(|display| display.matches_monitor(&monitor))
+            .cloned()
+            .map(|display| display as Rc<dyn PlatformDisplay>)
     }
 
     fn mouse_position(&self) -> Point<Pixels> {
@@ -822,8 +838,12 @@ impl PlatformWindow for WinitWindow {
         self.state.callbacks.should_close.set(Some(callback));
     }
 
-    fn on_hit_test_window_control(&self, _callback: Box<dyn FnMut() -> Option<WindowControlArea>>) {
-        // TODO(winit): Support client-decoration window control hit testing.
+    fn on_hit_test_window_control(&self, callback: Box<dyn FnMut() -> Option<WindowControlArea>>) {
+        self.state
+            .callbacks
+            .hit_test_window_control
+            .set(Some(callback));
+        // TODO(winit): Winit does not expose native non-client hit testing.
     }
 
     fn on_close(&self, callback: Box<dyn FnOnce()>) {
@@ -919,13 +939,17 @@ impl PlatformWindow for WinitWindow {
     }
 
     fn request_decorations(&self, decorations: gpui::WindowDecorations) {
-        self.state
-            .window
-            .set_decorations(decorations == gpui::WindowDecorations::Server);
+        let use_server_decorations = decorations == gpui::WindowDecorations::Server
+            && !self.state.use_client_decorations
+            && self.state.kind != WindowKind::PopUp;
+        self.state.window.set_decorations(use_server_decorations);
     }
 
     fn start_window_move(&self) {
-        let _ = self.state.window.drag_window();
+        if self.state.is_movable {
+            let _ = self.state.window.drag_window();
+        }
+        // TODO(winit): Native titlebar movement cannot be disabled through winit.
     }
 
     fn start_window_resize(&self, edge: ResizeEdge) {

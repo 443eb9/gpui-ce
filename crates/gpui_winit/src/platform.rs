@@ -20,7 +20,9 @@ use winit::{
 };
 
 use crate::{
-    app_state::{LoopCommand, WindowRegistry, WinitAppState, with_active_event_loop},
+    app_state::{
+        LoopCommand, WindowRegistry, WinitAppState, refresh_displays, with_active_event_loop,
+    },
     clipboard::WinitClipboard,
     dispatcher::WinitDispatcher,
     keyboard::WinitKeyboardLayout,
@@ -162,6 +164,8 @@ impl Platform for WinitUnifiedPlatform {
         let mut registry = self.registry.borrow_mut();
         registry.windows.clear();
         registry.active_window = None;
+        registry.last_active_window = None;
+        registry.hidden_windows.clear();
         drop(registry);
 
         if let Some(mut callback) = self.callbacks.quit.take() {
@@ -187,24 +191,57 @@ impl Platform for WinitUnifiedPlatform {
     }
 
     fn activate(&self, _ignoring_other_apps: bool) {
-        let registry = self.registry.borrow();
-        let state = registry
-            .active_window
-            .and_then(|handle| {
-                registry
-                    .windows
-                    .values()
-                    .find(|state| state.handle == handle)
-            })
-            .or_else(|| registry.windows.values().next());
-        if let Some(state) = state {
+        let (windows_to_restore, state_to_focus) = {
+            let mut registry = self.registry.borrow_mut();
+            let hidden_windows = std::mem::take(&mut registry.hidden_windows);
+            let windows_to_restore = hidden_windows
+                .iter()
+                .filter_map(|handle| {
+                    registry
+                        .windows
+                        .values()
+                        .find(|state| state.handle == *handle)
+                        .cloned()
+                })
+                .collect::<Vec<_>>();
+            let state_to_focus = registry
+                .active_window
+                .or(registry.last_active_window)
+                .and_then(|handle| {
+                    registry
+                        .windows
+                        .values()
+                        .find(|state| state.handle == handle)
+                        .cloned()
+                })
+                .or_else(|| windows_to_restore.first().cloned())
+                .or_else(|| registry.windows.values().next().cloned());
+            (windows_to_restore, state_to_focus)
+        };
+        for state in windows_to_restore {
+            state.window.set_visible(true);
+        }
+        if let Some(state) = state_to_focus {
             state.window.set_visible(true);
             state.window.focus_window();
         }
     }
 
     fn hide(&self) {
-        for state in self.registry.borrow().windows.values() {
+        let windows = self
+            .registry
+            .borrow()
+            .windows
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        let hidden_windows = windows
+            .iter()
+            .filter(|state| state.window.is_visible().unwrap_or(true))
+            .map(|state| state.handle)
+            .collect();
+        self.registry.borrow_mut().hidden_windows = hidden_windows;
+        for state in windows {
             state.window.set_visible(false);
         }
     }
@@ -248,30 +285,83 @@ impl Platform for WinitUnifiedPlatform {
         options: WindowParams,
     ) -> Result<Box<dyn PlatformWindow>> {
         with_active_event_loop(|event_loop| {
+            refresh_displays(&self.registry, event_loop);
             let title = options
                 .titlebar
                 .as_ref()
                 .and_then(|titlebar| titlebar.title.as_ref())
                 .map(ToString::to_string)
                 .unwrap_or_else(|| "GPUI".to_string());
+            let use_client_decorations = options.kind == WindowKind::PopUp
+                || options
+                    .titlebar
+                    .as_ref()
+                    .map(|titlebar| titlebar.appears_transparent)
+                    .unwrap_or(true);
             let mut buttons = WindowButtons::all();
             if !options.is_minimizable {
                 buttons.remove(WindowButtons::MINIMIZE);
             }
-            let level = match options.kind {
+            let level = match &options.kind {
                 WindowKind::PopUp | WindowKind::Floating => WindowLevel::AlwaysOnTop,
                 _ => WindowLevel::Normal,
             };
+            let requested_display = options.display_id.and_then(|display_id| {
+                self.registry
+                    .borrow()
+                    .displays
+                    .iter()
+                    .find(|display| gpui::PlatformDisplay::id(display.as_ref()) == display_id)
+                    .cloned()
+            });
+            if options.display_id.is_some() && requested_display.is_none() {
+                log::warn!("requested winit display is unavailable");
+            }
+            let requested_monitor = requested_display.as_ref().and_then(|display| {
+                event_loop
+                    .available_monitors()
+                    .find(|monitor| display.matches_monitor(monitor))
+            });
+            let logical_origin = requested_display
+                .as_ref()
+                .map(|display| {
+                    let display_bounds = display.bounds();
+                    let center = options.bounds.center();
+                    let center_is_on_display = center.x >= display_bounds.left()
+                        && center.x < display_bounds.right()
+                        && center.y >= display_bounds.top()
+                        && center.y < display_bounds.bottom();
+                    if center_is_on_display {
+                        options.bounds.origin
+                    } else {
+                        display_bounds.origin + options.bounds.origin
+                    }
+                })
+                .unwrap_or(options.bounds.origin);
+            let position = requested_monitor
+                .as_ref()
+                .map(|monitor| {
+                    let scale_factor = monitor.scale_factor() as f32;
+                    winit::dpi::Position::Physical(winit::dpi::PhysicalPosition::new(
+                        (logical_origin.x.as_f32() * scale_factor).round() as i32,
+                        (logical_origin.y.as_f32() * scale_factor).round() as i32,
+                    ))
+                })
+                .unwrap_or_else(|| {
+                    winit::dpi::LogicalPosition::new(
+                        logical_origin.x.as_f32() as f64,
+                        logical_origin.y.as_f32() as f64,
+                    )
+                    .into()
+                });
             let mut attributes = WindowAttributes::default()
                 .with_title(title.clone())
                 .with_surface_size(winit::dpi::LogicalSize::new(
                     options.bounds.size.width.as_f32() as f64,
                     options.bounds.size.height.as_f32() as f64,
                 ))
-                .with_position(winit::dpi::LogicalPosition::new(
-                    options.bounds.origin.x.as_f32() as f64,
-                    options.bounds.origin.y.as_f32() as f64,
-                ))
+                .with_position(position)
+                .with_decorations(!use_client_decorations)
                 .with_resizable(options.is_resizable)
                 .with_enabled_buttons(buttons)
                 .with_window_level(level)
@@ -296,11 +386,15 @@ impl Platform for WinitUnifiedPlatform {
                 .create_window(attributes)
                 .map(Arc::from)
                 .map_err(|error| anyhow!("failed to create winit window: {error}"))?;
+            refresh_displays(&self.registry, event_loop);
             let state = WindowState::new(
                 window,
                 handle,
                 self.cursor_visible.clone(),
                 title,
+                options.kind,
+                options.is_movable,
+                use_client_decorations,
                 self.gpu_context.clone(),
             )?;
             state.set_cursor(self.cursor_style.get());
@@ -313,6 +407,7 @@ impl Platform for WinitUnifiedPlatform {
 
             Ok(Box::new(WinitWindow::new(
                 state,
+                self.registry.clone(),
                 self.command_sender.clone(),
                 self.event_loop_proxy.clone(),
             )) as Box<dyn PlatformWindow>)
