@@ -1127,7 +1127,7 @@ impl App {
     #[cfg(any(
         target_os = "linux",
         target_os = "freebsd",
-        all(target_os = "windows", feature = "wgpu")
+        all(any(target_os = "windows", target_os = "macos"), feature = "wgpu")
     ))]
     pub fn set_gpu_requirements(&self, requirements: Box<dyn std::any::Any>) {
         self.platform.set_gpu_requirements(requirements);

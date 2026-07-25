@@ -184,6 +184,7 @@ jobs:
       - uses: hustcer/setup-nu@v3
       - uses: extractions/setup-just@v2
       - run: just build
+      - run: cargo check -p gpui_platform --features font-kit,winit
       - run: just test
       - run: just test-doc
 

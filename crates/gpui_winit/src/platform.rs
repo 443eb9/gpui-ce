@@ -283,7 +283,12 @@ impl Platform for WinitUnifiedPlatform {
         self.registry.borrow().active_window
     }
 
-    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
+    #[cfg(any(
+        target_os = "windows",
+        target_os = "macos",
+        target_os = "linux",
+        target_os = "freebsd"
+    ))]
     fn set_gpu_requirements(&self, requirements: Box<dyn std::any::Any>) {
         let Ok(requirements) = requirements.downcast::<gpui_wgpu::WgpuDeviceRequirements>() else {
             log::warn!("set_gpu_requirements: unexpected type, expected WgpuDeviceRequirements");

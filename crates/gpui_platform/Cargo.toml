@@ -25,7 +25,7 @@ runtime_shaders = ["gpui_macos/runtime_shaders"]
 wayland = ["gpui_linux/wayland"]
 x11 = ["gpui_linux/x11"]
 wgpu = ["gpui_windows/wgpu"]
-winit = ["dep:gpui_winit"]
+winit = ["dep:gpui_winit", "gpui/wgpu"]
 
 [dependencies]
 gpui.workspace = true
@@ -33,9 +33,11 @@ gpui.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 gpui_macos.workspace = true
 
+[target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
+gpui_winit = { optional = true, workspace = true }
+
 [target.'cfg(target_os = "windows")'.dependencies]
 gpui_windows.workspace = true
-gpui_winit = { optional = true, workspace = true }
 gpui = { workspace = true, features = ["windows-manifest"] }
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
