@@ -34,17 +34,25 @@ pub fn web_init() {
 
 /// Returns the default [`Platform`] for the current OS.
 pub fn current_platform(headless: bool) -> Rc<dyn Platform> {
-    #[cfg(target_os = "macos")]
-    {
-        Rc::new(gpui_macos::MacPlatform::new(headless))
-    }
-
-    #[cfg(all(target_os = "windows", feature = "winit"))]
+    #[cfg(all(
+        any(
+            target_os = "windows",
+            target_os = "macos",
+            target_os = "linux",
+            target_os = "freebsd"
+        ),
+        feature = "winit"
+    ))]
     {
         Rc::new(gpui_winit::WinitUnifiedPlatform::new(headless))
     }
 
-    #[cfg(all(target_os = "windows", not(feature = "winit")))]
+    #[cfg(all(target_os = "macos", feature = "native", not(feature = "winit")))]
+    {
+        Rc::new(gpui_macos::MacPlatform::new(headless))
+    }
+
+    #[cfg(all(target_os = "windows", feature = "native", not(feature = "winit")))]
     {
         Rc::new(
             gpui_windows::WindowsPlatform::new(headless)
@@ -52,7 +60,11 @@ pub fn current_platform(headless: bool) -> Rc<dyn Platform> {
         )
     }
 
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    #[cfg(all(
+        any(target_os = "linux", target_os = "freebsd"),
+        feature = "native",
+        not(feature = "winit")
+    ))]
     {
         gpui_linux::current_platform(headless)
     }
@@ -62,25 +74,39 @@ pub fn current_platform(headless: bool) -> Rc<dyn Platform> {
         let _ = headless;
         Rc::new(gpui_web::WebPlatform::new(true))
     }
+
+    #[cfg(all(
+        any(
+            target_os = "windows",
+            target_os = "macos",
+            target_os = "linux",
+            target_os = "freebsd"
+        ),
+        not(any(feature = "native", feature = "winit"))
+    ))]
+    {
+        let _ = headless;
+        panic!("gpui_platform requires either the `native` or `winit` feature")
+    }
 }
 
 /// Returns a new [`HeadlessRenderer`] for the current platform, if available.
 #[cfg(feature = "test-support")]
 pub fn current_headless_renderer() -> Option<Box<dyn gpui::PlatformHeadlessRenderer>> {
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "native", not(feature = "winit")))]
     {
         Some(Box::new(
             gpui_macos::metal_renderer::MetalHeadlessRenderer::new(),
         ))
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(all(target_os = "macos", feature = "native", not(feature = "winit"))))]
     {
         None
     }
 }
 
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(all(test, target_os = "macos", feature = "native", not(feature = "winit")))]
 mod tests {
     use super::*;
     use gpui::{AppContext, Empty, VisualTestAppContext};
