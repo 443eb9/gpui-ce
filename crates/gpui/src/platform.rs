@@ -249,7 +249,7 @@ pub trait Platform: 'static {
     #[cfg(any(
         target_os = "linux",
         target_os = "freebsd",
-        all(target_os = "windows", feature = "wgpu")
+        all(any(target_os = "windows", target_os = "macos"), feature = "wgpu")
     ))]
     fn set_gpu_requirements(&self, _requirements: Box<dyn std::any::Any>) {}
 
@@ -727,7 +727,7 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     #[cfg(any(
         target_os = "linux",
         target_os = "freebsd",
-        all(target_os = "windows", feature = "wgpu")
+        all(any(target_os = "windows", target_os = "macos"), feature = "wgpu")
     ))]
     fn gpu_context(&self) -> Option<Box<dyn std::any::Any>> {
         None

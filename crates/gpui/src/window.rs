@@ -4179,11 +4179,11 @@ impl Window {
         Ok(())
     }
 
-    /// Paint a surface into the scene for the next frame at the current z-index.
+    /// Paint a video frame into the scene for the next frame at the current z-index.
     ///
     /// This method should only be called as part of the paint phase of element drawing.
     #[cfg(target_os = "macos")]
-    pub fn paint_surface(&mut self, bounds: Bounds<Pixels>, image_buffer: CVPixelBuffer) {
+    pub fn paint_video_surface(&mut self, bounds: Bounds<Pixels>, image_buffer: CVPixelBuffer) {
         use crate::PaintSurface;
 
         self.invalidator.debug_assert_paint();
@@ -4194,8 +4194,20 @@ impl Window {
             order: 0,
             bounds,
             content_mask,
-            image_buffer,
+            image_buffer: Some(image_buffer),
+            #[cfg(feature = "wgpu")]
+            texture: None,
+            #[cfg(feature = "wgpu")]
+            texture_size: None,
         });
+    }
+
+    /// Paint a video frame into the scene for the next frame at the current z-index.
+    ///
+    /// This method should only be called as part of the paint phase of element drawing.
+    #[cfg(all(target_os = "macos", not(feature = "wgpu")))]
+    pub fn paint_surface(&mut self, bounds: Bounds<Pixels>, image_buffer: CVPixelBuffer) {
+        self.paint_video_surface(bounds, image_buffer);
     }
 
     /// Paint a surface into the scene for the next frame at the current z-index.
@@ -4204,7 +4216,7 @@ impl Window {
     #[cfg(any(
         target_os = "linux",
         target_os = "freebsd",
-        all(target_os = "windows", feature = "wgpu")
+        all(any(target_os = "windows", target_os = "macos"), feature = "wgpu")
     ))]
     pub fn paint_surface(
         &mut self,
@@ -4223,7 +4235,15 @@ impl Window {
             order: 0,
             bounds,
             content_mask,
+            #[cfg(target_os = "macos")]
+            image_buffer: None,
+            #[cfg(target_os = "macos")]
+            texture: Some(texture),
+            #[cfg(not(target_os = "macos"))]
             texture,
+            #[cfg(target_os = "macos")]
+            texture_size: Some(texture_size),
+            #[cfg(not(target_os = "macos"))]
             texture_size,
         });
     }
@@ -5539,7 +5559,7 @@ impl Window {
     #[cfg(any(
         target_os = "linux",
         target_os = "freebsd",
-        all(target_os = "windows", feature = "wgpu")
+        all(any(target_os = "windows", target_os = "macos"), feature = "wgpu")
     ))]
     pub fn gpu_context(&self) -> Option<Box<dyn std::any::Any>> {
         self.platform_window.gpu_context()

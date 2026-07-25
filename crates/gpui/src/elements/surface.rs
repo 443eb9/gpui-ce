@@ -5,7 +5,7 @@ use crate::{
 #[cfg(any(
     target_os = "linux",
     target_os = "freebsd",
-    all(target_os = "windows", feature = "wgpu")
+    all(any(target_os = "windows", target_os = "macos"), feature = "wgpu")
 ))]
 use crate::{DevicePixels, Size};
 #[cfg(target_os = "macos")]
@@ -14,7 +14,7 @@ use refineable::Refineable;
 #[cfg(any(
     target_os = "linux",
     target_os = "freebsd",
-    all(target_os = "windows", feature = "wgpu")
+    all(any(target_os = "windows", target_os = "macos"), feature = "wgpu")
 ))]
 use std::sync::Arc;
 
@@ -27,7 +27,7 @@ pub enum SurfaceSource {
     #[cfg(any(
         target_os = "linux",
         target_os = "freebsd",
-        all(target_os = "windows", feature = "wgpu")
+        all(any(target_os = "windows", target_os = "macos"), feature = "wgpu")
     ))]
     Texture {
         /// The GPU texture, type-erased (expected to be `Arc<wgpu::Texture>`)
@@ -45,7 +45,7 @@ impl Clone for SurfaceSource {
             #[cfg(any(
                 target_os = "linux",
                 target_os = "freebsd",
-                all(target_os = "windows", feature = "wgpu")
+                all(any(target_os = "windows", target_os = "macos"), feature = "wgpu")
             ))]
             SurfaceSource::Texture { ref texture, size } => SurfaceSource::Texture {
                 texture: Arc::clone(texture),
@@ -63,7 +63,7 @@ impl std::fmt::Debug for SurfaceSource {
             #[cfg(any(
                 target_os = "linux",
                 target_os = "freebsd",
-                all(target_os = "windows", feature = "wgpu")
+                all(any(target_os = "windows", target_os = "macos"), feature = "wgpu")
             ))]
             SurfaceSource::Texture { size, .. } => _f
                 .debug_struct("Texture")
@@ -156,12 +156,12 @@ impl Element for Surface {
                 let size = crate::size(surface.get_width().into(), surface.get_height().into());
                 let new_bounds = self.object_fit.get_bounds(_bounds, size);
                 // TODO: Add support for corner_radii
-                _window.paint_surface(new_bounds, surface.clone());
+                _window.paint_video_surface(new_bounds, surface.clone());
             }
             #[cfg(any(
                 target_os = "linux",
                 target_os = "freebsd",
-                all(target_os = "windows", feature = "wgpu")
+                all(any(target_os = "windows", target_os = "macos"), feature = "wgpu")
             ))]
             SurfaceSource::Texture {
                 ref texture,
