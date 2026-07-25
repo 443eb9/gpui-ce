@@ -785,6 +785,8 @@ impl VisualTestContext {
             position,
             modifiers,
             pressed_button: button.into(),
+            #[cfg(feature = "winit")]
+            tablet_tool: None,
         })
     }
 
@@ -801,6 +803,8 @@ impl VisualTestContext {
             button,
             click_count: 1,
             first_mouse: false,
+            #[cfg(feature = "winit")]
+            tablet_tool: None,
         })
     }
 
@@ -816,6 +820,8 @@ impl VisualTestContext {
             modifiers,
             button,
             click_count: 1,
+            #[cfg(feature = "winit")]
+            tablet_tool: None,
         })
     }
 
@@ -827,12 +833,16 @@ impl VisualTestContext {
             button: MouseButton::Left,
             click_count: 1,
             first_mouse: false,
+            #[cfg(feature = "winit")]
+            tablet_tool: None,
         });
         self.simulate_event(MouseUpEvent {
             position,
             modifiers,
             button: MouseButton::Left,
             click_count: 1,
+            #[cfg(feature = "winit")]
+            tablet_tool: None,
         });
     }
 

@@ -320,8 +320,10 @@ impl ApplicationHandler for WinitAppState {
                 WindowEvent::PointerEntered { position, .. } => {
                     state.pointer_entered(position);
                 }
-                WindowEvent::PointerMoved { position, .. } => {
-                    state.pointer_moved(position);
+                WindowEvent::PointerMoved {
+                    position, source, ..
+                } => {
+                    state.pointer_moved(position, source);
                 }
                 WindowEvent::PointerLeft { position, .. } => {
                     state.pointer_left(position);

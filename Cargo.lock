@@ -2516,6 +2516,7 @@ dependencies = [
  "wasm-bindgen",
  "web-time",
  "windows 0.61.3",
+ "winit",
  "zed-font-kit",
  "zed-scap",
 ]

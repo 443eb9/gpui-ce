@@ -414,6 +414,8 @@ impl<V: 'static + Render> TestAppWindow<V> {
             position,
             modifiers: Default::default(),
             pressed_button: None,
+            #[cfg(feature = "winit")]
+            tablet_tool: None,
         });
     }
 
@@ -425,6 +427,8 @@ impl<V: 'static + Render> TestAppWindow<V> {
             modifiers: Default::default(),
             click_count: 1,
             first_mouse: false,
+            #[cfg(feature = "winit")]
+            tablet_tool: None,
         });
     }
 
@@ -435,6 +439,8 @@ impl<V: 'static + Render> TestAppWindow<V> {
             button,
             modifiers: Default::default(),
             click_count: 1,
+            #[cfg(feature = "winit")]
+            tablet_tool: None,
         });
     }
 

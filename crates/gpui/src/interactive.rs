@@ -95,6 +95,32 @@ pub enum TouchPhase {
     Ended,
 }
 
+#[cfg(feature = "winit")]
+#[derive(Clone, Debug)]
+pub struct TabletTool {
+    pub kind: winit::event::TabletToolKind,
+    pub button: winit::event::TabletToolButton,
+    pub data: winit::event::TabletToolData,
+}
+
+#[cfg(feature = "winit")]
+impl Default for TabletTool {
+    fn default() -> Self {
+        Self {
+            kind: Default::default(),
+            button: winit::event::TabletToolButton::Contact,
+            data: Default::default(),
+        }
+    }
+}
+
+#[cfg(feature = "winit")]
+#[derive(Clone, Debug, Default)]
+pub struct TabletToolMove {
+    pub kind: winit::event::TabletToolKind,
+    pub data: winit::event::TabletToolData,
+}
+
 /// A mouse down event from the platform
 #[derive(Clone, Debug, Default)]
 pub struct MouseDownEvent {
@@ -112,6 +138,9 @@ pub struct MouseDownEvent {
 
     /// Whether this is the first, focusing click.
     pub first_mouse: bool,
+
+    #[cfg(feature = "winit")]
+    pub tablet_tool: Option<TabletTool>,
 }
 
 impl Sealed for MouseDownEvent {}
@@ -146,6 +175,9 @@ pub struct MouseUpEvent {
 
     /// The number of times the button has been clicked.
     pub click_count: usize,
+
+    #[cfg(feature = "winit")]
+    pub tablet_tool: Option<TabletTool>,
 }
 
 impl Sealed for MouseUpEvent {}
@@ -406,6 +438,9 @@ pub struct MouseMoveEvent {
 
     /// The modifiers that were held down when the mouse was moved.
     pub modifiers: Modifiers,
+
+    #[cfg(feature = "winit")]
+    pub tablet_tool: Option<TabletToolMove>,
 }
 
 impl Sealed for MouseMoveEvent {}

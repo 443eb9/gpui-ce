@@ -4691,6 +4691,8 @@ impl Window {
                         position,
                         pressed_button: Some(MouseButton::Left),
                         modifiers: Modifiers::default(),
+                        #[cfg(feature = "winit")]
+                        tablet_tool: None,
                     })
                 }
                 FileDropEvent::Pending { position } => {
@@ -4699,6 +4701,8 @@ impl Window {
                         position,
                         pressed_button: Some(MouseButton::Left),
                         modifiers: Modifiers::default(),
+                        #[cfg(feature = "winit")]
+                        tablet_tool: None,
                     })
                 }
                 FileDropEvent::Submit { position } => {
@@ -4709,6 +4713,8 @@ impl Window {
                         position,
                         modifiers: Modifiers::default(),
                         click_count: 1,
+                        #[cfg(feature = "winit")]
+                        tablet_tool: None,
                     })
                 }
                 FileDropEvent::Exited => {
@@ -5654,12 +5660,16 @@ impl Window {
                         modifiers: Modifiers::default(),
                         click_count: 1,
                         first_mouse: false,
+                        #[cfg(feature = "winit")]
+                        tablet_tool: None,
                     });
                     let mouse_up = PlatformInput::MouseUp(MouseUpEvent {
                         button: MouseButton::Left,
                         position: center,
                         modifiers: Modifiers::default(),
                         click_count: 1,
+                        #[cfg(feature = "winit")]
+                        tablet_tool: None,
                     });
                     self.dispatch_event(mouse_down, cx);
                     self.dispatch_event(mouse_up, cx);
@@ -5890,6 +5900,8 @@ impl Window {
             position,
             modifiers: self.modifiers,
             pressed_button: None,
+            #[cfg(feature = "winit")]
+            tablet_tool: None,
         });
         let _ = self.dispatch_event(event, cx);
     }

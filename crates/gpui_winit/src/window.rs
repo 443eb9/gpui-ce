@@ -13,8 +13,9 @@ use gpui::{
     GpuSpecs, KeyDownEvent, KeyUpEvent, Modifiers, ModifiersChangedEvent, MouseDownEvent,
     MouseExitEvent, MouseMoveEvent, MouseUpEvent, Pixels, PlatformAtlas, PlatformDisplay,
     PlatformInput, PlatformInputHandler, PlatformWindow, Point, PromptButton, PromptLevel,
-    RequestFrameOptions, ResizeEdge, Scene, ScrollDelta, ScrollWheelEvent, Size, WindowAppearance,
-    WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowKind,
+    RequestFrameOptions, ResizeEdge, Scene, ScrollDelta, ScrollWheelEvent, Size, TabletTool,
+    TabletToolMove, WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea,
+    WindowKind,
 };
 use gpui_wgpu::{GpuContext, WgpuDeviceRequirements, WgpuRenderer, WgpuSurfaceConfig, wgpu};
 use raw_window_handle::{
@@ -355,7 +356,11 @@ impl WindowState {
         self.hovered(true);
     }
 
-    pub(crate) fn pointer_moved(&self, position: winit::dpi::PhysicalPosition<f64>) {
+    pub(crate) fn pointer_moved(
+        &self,
+        position: winit::dpi::PhysicalPosition<f64>,
+        source: winit::event::PointerSource,
+    ) {
         self.restore_cursor();
         let position = logical_position(position, self.scale_factor());
         self.mouse_position.set(position);
@@ -364,6 +369,12 @@ impl WindowState {
             position,
             pressed_button: self.pressed_button.get(),
             modifiers: self.modifiers.get(),
+            tablet_tool: match source {
+                winit::event::PointerSource::TabletTool { kind, data } => {
+                    Some(TabletToolMove { kind, data })
+                }
+                _ => None,
+            },
         }));
     }
 
@@ -386,6 +397,12 @@ impl WindowState {
         position: winit::dpi::PhysicalPosition<f64>,
         button: winit::event::ButtonSource,
     ) -> Option<WindowControlArea> {
+        let tablet_tool = match button.clone() {
+            winit::event::ButtonSource::TabletTool { kind, button, data } => {
+                Some(TabletTool { kind, button, data })
+            }
+            _ => None,
+        };
         let Some(button) = mouse_button_from_winit(button) else {
             return None;
         };
@@ -403,6 +420,7 @@ impl WindowState {
                     modifiers,
                     click_count,
                     first_mouse: false,
+                    tablet_tool,
                 }));
                 if button == gpui::MouseButton::Left {
                     let control = self.hit_test_window_control();
@@ -425,6 +443,7 @@ impl WindowState {
                     position,
                     modifiers,
                     click_count,
+                    tablet_tool,
                 }));
                 if button != gpui::MouseButton::Left {
                     return None;

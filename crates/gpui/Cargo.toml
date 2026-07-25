@@ -33,6 +33,7 @@ screen-capture = ["scap"]
 windows-manifest = ["dep:embed-resource"]
 input-latency-histogram = ["dep:hdrhistogram"]
 wgpu = []
+winit = ["dep:winit"]
 
 [lib]
 path = "src/gpui.rs"
@@ -100,6 +101,7 @@ spin = "0.10.0"
 pollster.workspace = true
 url.workspace = true
 uuid.workspace = true
+winit = { workspace = true, optional = true }
 web-time.workspace = true
 
 [target.'cfg(target_family = "wasm")'.dependencies]
