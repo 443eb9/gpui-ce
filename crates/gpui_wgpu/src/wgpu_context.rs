@@ -209,10 +209,7 @@ impl WgpuContext {
 
     #[cfg(not(target_family = "wasm"))]
     pub fn instance(display: Box<dyn wgpu::wgt::WgpuHasDisplayHandle>) -> wgpu::Instance {
-        #[cfg(not(target_os = "windows"))]
-        let backends = wgpu::Backends::VULKAN | wgpu::Backends::GL;
-        #[cfg(target_os = "windows")]
-        let backends = wgpu::Backends::DX12;
+        let backends = wgpu::Backends::VULKAN;
 
         wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends,
