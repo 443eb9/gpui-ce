@@ -1876,11 +1876,15 @@ impl WgpuRenderer {
                 content_mask: surface.content_mask.bounds.into(),
             };
 
-            resources.queue.write_buffer(
-                &resources.surface_uniform_buffer,
-                0,
-                bytemuck::bytes_of(&params),
-            );
+            let params_buffer = resources.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("surface_params_buffer"),
+                size: std::mem::size_of::<SurfaceParams>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            resources
+                .queue
+                .write_buffer(&params_buffer, 0, bytemuck::bytes_of(&params));
 
             let bind_group = resources
                 .device
@@ -1890,7 +1894,7 @@ impl WgpuRenderer {
                     entries: &[
                         wgpu::BindGroupEntry {
                             binding: 0,
-                            resource: resources.surface_uniform_buffer.as_entire_binding(),
+                            resource: params_buffer.as_entire_binding(),
                         },
                         wgpu::BindGroupEntry {
                             binding: 1,
