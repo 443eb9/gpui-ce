@@ -39,7 +39,7 @@ pub fn current_platform(headless: bool) -> Rc<dyn Platform> {
         Rc::new(gpui_macos::MacPlatform::new(headless))
     }
 
-    #[cfg(all(any(target_os = "windows", target_os = "macos"), feature = "winit"))]
+    #[cfg(feature = "winit")]
     {
         Rc::new(gpui_winit::WinitUnifiedPlatform::new(headless))
     }
