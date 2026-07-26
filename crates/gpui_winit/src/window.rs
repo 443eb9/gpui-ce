@@ -1162,7 +1162,12 @@ impl PlatformWindow for WinitWindow {
         Some(self.state.renderer.borrow().gpu_specs())
     }
 
-    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
+    #[cfg(any(
+        target_os = "windows",
+        target_os = "macos",
+        target_os = "linux",
+        target_os = "freebsd"
+    ))]
     fn gpu_context(&self) -> Option<Box<dyn std::any::Any>> {
         Some(Box::new(self.state.renderer.borrow().gpu_context()))
     }

@@ -34,6 +34,7 @@ pub fn web_init() {
 
 /// Returns the default [`Platform`] for the current OS.
 pub fn current_platform(headless: bool) -> Rc<dyn Platform> {
+<<<<<<< HEAD
     #[cfg(all(
         any(
             target_os = "windows",
@@ -43,6 +44,14 @@ pub fn current_platform(headless: bool) -> Rc<dyn Platform> {
         ),
         feature = "winit"
     ))]
+=======
+    #[cfg(all(target_os = "macos", not(feature = "winit")))]
+    {
+        Rc::new(gpui_macos::MacPlatform::new(headless))
+    }
+
+    #[cfg(all(any(target_os = "windows", target_os = "macos"), feature = "winit"))]
+>>>>>>> winit-backend
     {
         Rc::new(gpui_winit::WinitUnifiedPlatform::new(headless))
     }

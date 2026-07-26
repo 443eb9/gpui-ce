@@ -283,7 +283,12 @@ impl Platform for WinitUnifiedPlatform {
         self.registry.borrow().active_window
     }
 
-    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
+    #[cfg(any(
+        target_os = "windows",
+        target_os = "macos",
+        target_os = "linux",
+        target_os = "freebsd"
+    ))]
     fn set_gpu_requirements(&self, requirements: Box<dyn std::any::Any>) {
         let Ok(requirements) = requirements.downcast::<gpui_wgpu::WgpuDeviceRequirements>() else {
             log::warn!("set_gpu_requirements: unexpected type, expected WgpuDeviceRequirements");
@@ -595,4 +600,12 @@ impl Platform for WinitUnifiedPlatform {
     fn on_keyboard_layout_change(&self, callback: Box<dyn FnMut()>) {
         self.callbacks.keyboard_layout_change.set(Some(callback));
     }
+
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    fn read_from_primary(&self) -> Option<ClipboardItem> {
+        None
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    fn write_to_primary(&self, item: ClipboardItem) {}
 }

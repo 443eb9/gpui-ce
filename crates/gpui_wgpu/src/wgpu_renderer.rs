@@ -1850,11 +1850,22 @@ impl WgpuRenderer {
         )
     }
 
-    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "windows"))]
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "windows",
+        target_os = "macos"
+    ))]
     fn draw_surfaces(&self, surfaces: &[PaintSurface], pass: &mut wgpu::RenderPass<'_>) -> bool {
         let resources = self.resources();
         for surface in surfaces {
-            let Some(wgpu_texture) = surface.texture.downcast_ref::<wgpu::Texture>() else {
+            #[cfg(target_os = "macos")]
+            let Some(texture) = surface.texture.as_ref() else {
+                continue;
+            };
+            #[cfg(not(target_os = "macos"))]
+            let texture = &surface.texture;
+            let Some(wgpu_texture) = texture.downcast_ref::<wgpu::Texture>() else {
                 continue;
             };
 
@@ -1900,7 +1911,12 @@ impl WgpuRenderer {
         true
     }
 
-    #[cfg(not(any(target_os = "linux", target_os = "freebsd", target_os = "windows")))]
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "windows",
+        target_os = "macos"
+    )))]
     fn draw_surfaces(&self, _surfaces: &[PaintSurface], _pass: &mut wgpu::RenderPass<'_>) -> bool {
         true
     }
